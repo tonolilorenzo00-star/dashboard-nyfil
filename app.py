@@ -78,8 +78,6 @@ def detect_country(cap: str, provincia: str) -> str:
 
 @st.cache_resource
 def get_db_connection():
-    # Fix for Streamlit Cloud: Use an absolute path in a writable directory
-    # For local, it's the same. For cloud, Streamlit handles this.
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
 def init_db():
@@ -177,7 +175,7 @@ def save_evaluation(cliente: str, anno: str, data_dict: dict):
             conn.execute(query, tuple(values))
         st.toast(f"Valutazione per {cliente.upper()} ({anno}) salvata!")
     except sqlite3.OperationalError as e:
-        st.error("Errore di salvataggio. Sulla versione gratuita di Streamlit Cloud, il database potrebbe essere in sola lettura o resettarsi periodicamente. Riprova più tardi o esegui l'app localmente per un salvataggio permanente.")
+        st.error(f"Errore di salvataggio: {e}. Sulla versione gratuita di Streamlit Cloud, il database potrebbe essere in sola lettura. Riprova più tardi.")
 
 # --- FUNZIONI PER NUOVA ANALISI ---
 
@@ -236,12 +234,12 @@ if df_clienti.empty:
 # --- HOME PAGE ---
 anni_disponibili = sorted(df_clienti['ANNO'].unique(), reverse=True)
 col1, col2 = st.columns(2)
-anni_selezionati = col1.multiselect("Filtra per Anno", options=anni_disponibili, default=anni_disponibili)
+anni_selezionati_globali = col1.multiselect("Filtra per Anno (Globale)", options=anni_disponibili, default=anni_disponibili)
 paese_selezionato = col2.selectbox("Filtra per Paese", options=["Tutti", "Italia", "Estero"])
 
 st.header("Macrodati Ordini (per anni selezionati)")
-if not df_ordini.empty and anni_selezionati:
-    ordini_filtrati_globale = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
+if not df_ordini.empty and anni_selezionati_globali:
+    ordini_filtrati_globale = df_ordini[df_ordini['ANNO'].isin(anni_selezionati_globali)]
     col1_macro, col2_macro, col3_macro = st.columns(3)
     with col1_macro:
         st.markdown("###### Top 10 Articoli (per Kg)")
@@ -260,7 +258,7 @@ else:
 
 st.divider()
 
-df_filtrato = df_clienti[df_clienti['ANNO'].isin(anni_selezionati)] if anni_selezionati else df_clienti
+df_filtrato = df_clienti[df_clienti['ANNO'].isin(anni_selezionati_globali)] if anni_selezionati_globali else df_clienti
 if paese_selezionato != "Tutti": df_filtrato = df_filtrato[df_filtrato['PAESE'] == paese_selezionato]
 
 if not df_filtrato.empty:
@@ -276,8 +274,8 @@ if not df_filtrato.empty:
 st.subheader("Ranking Clienti")
 if not df_filtrato.empty:
     df_ranking = df_filtrato.groupby('CLIENTE').agg(Fatturato_Anagrafica=('FATTURATO', 'sum'), PAESE=('PAESE', 'first')).reset_index()
-    if not df_ordini.empty and anni_selezionati:
-        ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
+    if not df_ordini.empty and anni_selezionati_globali:
+        ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati_globali)]
         df_ordini_agg = ordini_filtrati.groupby('nome_cliente').agg(
             KG_Ordinati=('KG', 'sum')
         ).reset_index()
@@ -296,10 +294,10 @@ if not df_filtrato.empty:
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 with st.expander("Segmentazione Clienti (Basata sull'ultimo anno di valutazione)"):
-    if not anni_selezionati:
+    if not anni_selezionati_globali:
         st.info("Seleziona un anno per visualizzare la segmentazione.")
     else:
-        anno_segmentazione = anni_selezionati[0]
+        anno_segmentazione = anni_selezionati_globali[0]
         all_evals = []
         clienti_unici_filtrati = df_filtrato['CLIENTE'].unique()
         for cliente in clienti_unici_filtrati:
@@ -331,47 +329,42 @@ clienti_selezionati = [c.lower() for c in clienti_selezionati_upper]
 if clienti_selezionati:
     st.divider()
     
-    # Selettore anno DENTRO la scheda cliente
-    anno_default_index = 0
-    if anni_selezionati:
-        if anni_selezionati[0] in anni_disponibili:
-            anno_default_index = anni_disponibili.index(anni_selezionati[0])
-
-    anno_scheda = st.selectbox(
-        "Seleziona l'anno di riferimento per l'analisi di dettaglio", 
+    anni_scheda_selezionati = st.multiselect(
+        "Seleziona anni per l'analisi di dettaglio", 
         options=anni_disponibili, 
-        index=anno_default_index,
-        key="anno_dettaglio_selector"
+        default=anni_selezionati_globali,
+        key="anni_dettaglio_selector"
     )
-
+    
     st.header(f"Scheda Alleati: {', '.join(clienti_selezionati_upper)}")
+    
+    anno_riferimento_scheda = anni_scheda_selezionati[0] if anni_scheda_selezionati else anni_disponibili[0]
     
     tab_eval, tab_dati, tab_ordini = st.tabs(["Valutazione Alleati", "Anagrafica & Fatturato", "Ordini & Statistiche"])
     
     with tab_eval:
-        st.subheader(f"Valutazioni Individuali (Anno di riferimento: {anno_scheda})")
+        st.subheader(f"Valutazioni Individuali (Anno di riferimento: {anno_riferimento_scheda})")
         evals_data = {}
         for cliente in clienti_selezionati:
             with st.expander(f"Valutazione per {cliente.upper()}"):
-                with st.form(key=f"evaluation_form_{cliente}_{anno_scheda}"):
-                    eval_data = load_evaluation(cliente, anno_scheda)
+                with st.form(key=f"evaluation_form_{cliente}_{anno_riferimento_scheda}"):
+                    eval_data = load_evaluation(cliente, anno_riferimento_scheda)
                     
                     cols = st.columns(3)
                     temp_eval_data = {}
                     for i, q in enumerate(EVALUATION_QUESTIONS):
                         with cols[i % 3]:
                             temp_eval_data[q['key']] = st.slider(
-                                q['text'], 1, 5, value=eval_data.get(q['key'], 3), key=f"{q['key']}_{cliente}_{anno_scheda}"
+                                q['text'], 1, 5, value=eval_data.get(q['key'], 3), key=f"{q['key']}_{cliente}_{anno_riferimento_scheda}"
                             )
                     
                     submitted = st.form_submit_button("Salva Valutazione")
                     if submitted:
-                        save_evaluation(cliente, anno_scheda, temp_eval_data)
-                        st.cache_data.clear() # Pulisce la cache per ricaricare i dati
+                        save_evaluation(cliente, anno_riferimento_scheda, temp_eval_data)
+                        st.cache_data.clear()
                         st.rerun()
 
-                evals_data[cliente] = load_evaluation(cliente, anno_scheda)
-
+                evals_data[cliente] = load_evaluation(cliente, anno_riferimento_scheda)
 
         st.divider()
         st.subheader("Analisi Strategica Comparata")
@@ -401,14 +394,14 @@ if clienti_selezionati:
         for cliente in clienti_selezionati:
             with st.expander(f"Dati per {cliente.upper()}"):
                 dati_cliente = df_clienti[df_clienti['CLIENTE'] == cliente]
-                st.subheader("Anagrafica")
+                st.subheader(f"Anagrafica (Riferimento anno: {anno_riferimento_scheda})")
                 
-                anagrafica_anno_scheda = dati_cliente[dati_cliente['ANNO'] == anno_scheda]
+                anagrafica_anno_scheda = dati_cliente[dati_cliente['ANNO'] == anno_riferimento_scheda]
                 if not anagrafica_anno_scheda.empty:
                     anagrafica = anagrafica_anno_scheda.iloc[0]
                 elif not dati_cliente.empty:
                     anagrafica = dati_cliente.sort_values('ANNO', ascending=False).iloc[0]
-                    st.info(f"Dati anagrafici per l'anno {anno_scheda} non trovati. Mostro i più recenti disponibili.")
+                    st.info(f"Dati anagrafici per l'anno {anno_riferimento_scheda} non trovati. Mostro i più recenti.")
                 else:
                     st.warning("Dati anagrafici non disponibili.")
                     continue
@@ -424,13 +417,13 @@ if clienti_selezionati:
                 st.plotly_chart(fig_bar, use_container_width=True)
 
     with tab_ordini:
-        st.subheader(f"Statistiche Ordini (Anni globali selezionati: {', '.join(anni_selezionati)})")
-        if df_ordini.empty or not anni_selezionati:
-            st.info("Seleziona anni e assicurati che i file ordini siano presenti.")
+        st.subheader(f"Statistiche Ordini (Anni selezionati: {', '.join(anni_scheda_selezionati)})")
+        if df_ordini.empty or not anni_scheda_selezionati:
+            st.info("Seleziona uno o più anni nel selettore qui sopra per visualizzare le statistiche degli ordini.")
         else:
-            ordini_selezionati = df_ordini[(df_ordini['ANNO'].isin(anni_selezionati)) & (df_ordini['nome_cliente'].isin(clienti_selezionati))]
+            ordini_selezionati = df_ordini[(df_ordini['ANNO'].isin(anni_scheda_selezionati)) & (df_ordini['nome_cliente'].isin(clienti_selezionati))]
             if ordini_selezionati.empty:
-                st.info("Nessun ordine trovato per i clienti selezionati negli anni indicati.")
+                st.info("Nessun ordine trovato per i clienti e gli anni selezionati.")
             else:
                 st.subheader("Statistiche Aggregate (Clienti Selezionati)")
                 total_kg, total_fatturato_ordini = ordini_selezionati['KG'].sum(), ordini_selezionati['FATTURATO_ORDINE'].sum()
@@ -472,23 +465,16 @@ if clienti_selezionati:
                             }
                             if 'Totale_Fatturato' in df_agg.columns:
                                 df_display = df_agg.copy()
-                                # Utilizza st.column_config per allineare a destra
                                 column_config["Totale_Fatturato"] = st.column_config.NumberColumn(
                                     "Totale Fatturato",
                                     format="€ %.2f"
                                 )
-                                
-                                st.dataframe(
-                                    df_display, 
-                                    use_container_width=True, 
-                                    hide_index=True,
-                                    column_config=column_config
-                                )
+                                st.dataframe(df_display, use_container_width=True, hide_index=True, column_config=column_config)
                             else:
                                 st.dataframe(df_agg, use_container_width=True, hide_index=True, column_config=column_config)
                             
                             csv = df_agg.to_csv(index=False, sep=';', decimal=',', encoding='latin1')
-                            st.download_button(f"📥 Export {title}", csv, f"{filename_prefix}_{cliente}.csv", "text/csv", key=f"btn_{filename_prefix}_{key_suffix}_{anno_scheda}")
+                            st.download_button(f"📥 Export {title}", csv, f"{filename_prefix}_{cliente}.csv", "text/csv", key=f"btn_{filename_prefix}_{key_suffix}_{'_'.join(anni_scheda_selezionati)}")
 
                         agg_articolo_full = ordini_cliente_singolo.groupby('ARTICOLO').agg(
                             Totale_Kg=('KG', 'sum'),
