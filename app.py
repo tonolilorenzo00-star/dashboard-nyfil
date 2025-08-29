@@ -94,9 +94,9 @@ def load_clients_df(uploaded_file=None) -> pd.DataFrame:
         df.columns = [col.strip().lower() for col in df.columns]
         required_cols = {"nome_cliente": "CLIENTE", "via": "VIA", "città": "CITTA", "cap": "CAP", "provincia": "PROVINCIA", "titolare_azienda": "TITOLARE", "recapiti_mail": "EMAIL", "anno": "ANNO_ORIG", "imponibile": "IMPONIBILE"}
         df.rename(columns=required_cols, inplace=True)
-        # FIX: Pulisce gli spazi bianchi dai nomi dei clienti per garantire la corrispondenza
+        # FIX DEFINITIVO: Standardizza i nomi dei clienti (lowercase, no spazi)
         if 'CLIENTE' in df.columns:
-            df['CLIENTE'] = df['CLIENTE'].str.strip()
+            df['CLIENTE'] = df['CLIENTE'].str.strip().str.lower()
             
         df['ANNO'] = df['ANNO_ORIG'].apply(normalize_year)
         df['FATTURATO'] = df['IMPONIBILE'].apply(parse_decimal_string)
@@ -111,55 +111,4 @@ def load_clients_df(uploaded_file=None) -> pd.DataFrame:
 
 @st.cache_data
 def load_all_orders_df() -> pd.DataFrame:
-    order_files = glob.glob(str(DATA_DIR / "ordini_*"))
-    if not order_files: return pd.DataFrame()
-    df_list = []
-    for file in order_files:
-        try:
-            year_match = re.search(r'(\d+)', Path(file).stem)
-            if not year_match: continue
-            year_full = normalize_year(year_match.group(1))
-            df = pd.read_csv(file, sep=';', encoding='latin1') if file.endswith('.csv') else pd.read_excel(file)
-            df.columns = [re.sub(r'_\d+$', '', col).strip().lower() for col in df.columns]
-            df['ANNO'] = year_full
-            df_list.append(df)
-        except Exception as e:
-            st.warning(f"Impossibile leggere il file {file}: {e}")
-    if not df_list: return pd.DataFrame()
-    
-    df_orders = pd.concat(df_list, ignore_index=True)
-    
-    # FIX: Pulisce gli spazi bianchi dai nomi dei clienti per garantire la corrispondenza
-    if 'nome_cliente' in df_orders.columns:
-        df_orders['nome_cliente'] = df_orders['nome_cliente'].str.strip()
-
-    df_orders.dropna(subset=['articolo_colore', 'quantita'], inplace=True)
-    df_orders = df_orders[df_orders['quantita'] != 0].copy()
-    
-    if 'imponibile' in df_orders.columns:
-        df_orders['FATTURATO_ORDINE'] = df_orders['imponibile'].apply(parse_decimal_string)
-    else:
-        df_orders['FATTURATO_ORDINE'] = 0
-
-    df_orders['KG'] = df_orders['quantita'].apply(parse_decimal_string).round(2)
-    split_data = df_orders['articolo_colore'].str.rsplit(' - ', n=1, expand=True)
-    df_orders['ARTICOLO'] = split_data[0].str.strip()
-    df_orders['COLORE'] = split_data[1].str.strip().fillna('NON SPECIFICATO')
-    
-    return df_orders[['nome_cliente', 'ANNO', 'ARTICOLO', 'COLORE', 'KG', 'FATTURATO_ORDINE']]
-
-def load_evaluation(cliente: str, anno: str) -> dict:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    question_keys = [q['key'] for q in EVALUATION_QUESTIONS]
-    cursor.execute(f"SELECT {', '.join(question_keys)} FROM evaluation WHERE cliente = ? AND anno = ?", (cliente, anno))
-    row = cursor.fetchone()
-    if row: return dict(zip(question_keys, row))
-    return {key: 3 for key in question_keys}
-
-def save_evaluation(cliente: str, anno: str, data_dict: dict):
-    conn = get_db_connection()
-    question_keys = [q['key'] for q in EVALUATION_QUESTIONS]
-    columns, placeholders = ", ".join(question_keys), ", ".join(["?"] * len(question_keys))
-    query = f"INSERT OR REPLACE INTO evaluation (cliente, anno, {columns}, updated_at) VALUES (?, ?, {placeholders}, ?)"
-    values = [cliente, anno] + [data_dict.get(key,
+    order
