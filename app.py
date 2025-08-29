@@ -127,8 +127,14 @@ def load_all_orders_df() -> pd.DataFrame:
     
     df_orders.dropna(subset=['articolo_colore', 'quantita'], inplace=True)
     df_orders = df_orders[df_orders['quantita'] != 0].copy()
+    
+    # Assicurarsi che la colonna 'imponibile' esista prima di usarla
+    if 'imponibile' in df_orders.columns:
+        df_orders['FATTURATO_ORDINE'] = df_orders['imponibile'].apply(parse_decimal_string)
+    else:
+        df_orders['FATTURATO_ORDINE'] = 0
+
     df_orders['KG'] = df_orders['quantita'].apply(parse_decimal_string).round(2)
-    df_orders['FATTURATO_ORDINE'] = df_orders['imponibile'].apply(parse_decimal_string)
     split_data = df_orders['articolo_colore'].str.rsplit(' - ', n=1, expand=True)
     df_orders['ARTICOLO'] = split_data[0].str.strip()
     df_orders['COLORE'] = split_data[1].str.strip().fillna('NON SPECIFICATO')
@@ -256,7 +262,9 @@ if not df_filtrato.empty:
             KG_Ordinati=('KG', 'sum'),
             Fatturato_Ordini=('FATTURATO_ORDINE', 'sum')
         ).reset_index()
-        df_ranking = pd.merge(df_ranking, df_ordini_agg, left_on='CLIENTE', right_on='nome_cliente', how='left').fillna(0)
+        df_ranking = pd.merge(df_ranking, df_ordini_agg, left_on='CLIENTE', right_on='nome_cliente', how='left')
+        df_ranking[['KG_Ordinati', 'Fatturato_Ordini']] = df_ranking[['KG_Ordinati', 'Fatturato_Ordini']].fillna(0)
+
     else:
         df_ranking['KG_Ordinati'] = 0
         df_ranking['Fatturato_Ordini'] = 0
@@ -410,7 +418,14 @@ if clienti_selezionati:
 
                         def display_agg_table(df_agg, title, filename_prefix, key_suffix):
                             st.markdown(f"##### {title}")
-                            st.dataframe(df_agg, use_container_width=True, hide_index=True)
+                            # Formattazione colonna Fatturato se esiste
+                            if 'Totale_Fatturato' in df_agg.columns:
+                                df_display = df_agg.copy()
+                                df_display['Totale_Fatturato'] = df_display['Totale_Fatturato'].apply(format_euro)
+                                st.dataframe(df_display, use_container_width=True, hide_index=True)
+                            else:
+                                st.dataframe(df_agg, use_container_width=True, hide_index=True)
+                            
                             csv = df_agg.to_csv(index=False, sep=';', decimal=',', encoding='latin1')
                             st.download_button(f"📥 Export {title}", csv, f"{filename_prefix}_{cliente}.csv", "text/csv", key=f"btn_{filename_prefix}_{key_suffix}")
 
@@ -419,20 +434,16 @@ if clienti_selezionati:
                             Totale_Kg=('KG', 'sum'),
                             Totale_Fatturato=('FATTURATO_ORDINE', 'sum')
                         ).reset_index().sort_values('Totale_Kg', ascending=False)
-                        agg_articolo_full['Totale_Fatturato'] = agg_articolo_full['Totale_Fatturato'].apply(format_euro)
                         display_agg_table(agg_articolo_full, "Dettaglio Analisi per Articolo", "analisi_articolo", cliente)
 
                         agg_colore_full = ordini_cliente_singolo.groupby('COLORE').agg(
                             Totale_Kg=('KG', 'sum'),
                             Totale_Fatturato=('FATTURATO_ORDINE', 'sum')
                         ).reset_index().sort_values('Totale_Kg', ascending=False)
-                        agg_colore_full['Totale_Fatturato'] = agg_colore_full['Totale_Fatturato'].apply(format_euro)
                         display_agg_table(agg_colore_full, "Dettaglio Analisi per Colore", "analisi_colore", cliente)
 
                         agg_articolo_colore_full = ordini_cliente_singolo.groupby(['ARTICOLO', 'COLORE']).agg(
                             Totale_Kg=('KG', 'sum'),
                             Totale_Fatturato=('FATTURATO_ORDINE', 'sum')
                         ).reset_index().sort_values('Totale_Kg', ascending=False)
-                        agg_articolo_colore_full['Totale_Fatturato'] = agg_articolo_colore_full['Totale_Fatturato'].apply(format_euro)
                         display_agg_table(agg_articolo_colore_full, "Dettaglio Analisi per Articolo e Colore", "analisi_articolo_colore", cliente)
-
