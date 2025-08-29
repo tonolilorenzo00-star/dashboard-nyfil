@@ -4,7 +4,6 @@ import sqlite3
 import plotly.graph_objects as go
 from pathlib import Path
 from datetime import datetime
-import locale
 import numpy as np
 import glob
 import re
@@ -41,16 +40,17 @@ EVALUATION_QUESTIONS = [
     {"key": "q15", "text": "15. E' UN PARTNER CON IL QUALE POTER CONDIVIDERE LA NOSTRA STRATEGIA?", "category": "Potenziale Futuro"},
 ]
 
-try:
-    locale.setlocale(locale.LC_ALL, 'it_IT.UTF-8')
-except locale.Error:
-    st.warning("Localizzazione italiana non trovata.")
-
 # --- FUNZIONI DI UTILITÀ ---
 
-def format_euro(value):
-    try: return locale.currency(value, symbol='€', grouping=True)
-    except (TypeError, ValueError): return "N/A"
+def format_euro_robust(value):
+    """Funzione di formattazione valuta indipendente dalla configurazione locale del server."""
+    try:
+        if pd.isna(value) or not isinstance(value, (int, float)):
+            return "N/A"
+        # Formatta il numero con separatore delle migliaia e due decimali, poi inverte i separatori
+        return f"€ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except (TypeError, ValueError):
+        return "N/A"
 
 def parse_decimal_string(s: str) -> float:
     if not isinstance(s, str): s = str(s)
@@ -68,7 +68,6 @@ def clean_customer_name(name: str) -> str:
     """Funzione robusta per pulire e standardizzare i nomi dei clienti."""
     if not isinstance(name, str):
         return ""
-    # Rimuove spazi extra, converte in minuscolo
     name = re.sub(r'\s+', ' ', name).strip().lower()
     return name
 
@@ -262,7 +261,7 @@ if not df_filtrato.empty:
     revenue_italia = df_filtrato[df_filtrato['PAESE'] == 'Italia']['FATTURATO'].sum()
     quota_italia = (revenue_italia / total_revenue * 100) if total_revenue > 0 else 0
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.metric("Totale Fatturato (da anagrafica)", format_euro(total_revenue))
+    kpi1.metric("Totale Fatturato (da anagrafica)", format_euro_robust(total_revenue))
     kpi2.metric("Quota Italia", f"{quota_italia:.1f}%")
     kpi3.metric("Quota Estero", f"{100 - quota_italia:.1f}%")
     kpi4.metric("N. Clienti nel filtro", f"{df_filtrato['CLIENTE'].nunique()}")
@@ -289,8 +288,8 @@ if not df_filtrato.empty:
 
     df_display = df_ranking[['CLIENTE_DISPLAY', 'PAESE', 'Fatturato_Anagrafica', 'Fatturato_Ordini', 'KG_Ordinati']].copy()
     df_display.rename(columns={'CLIENTE_DISPLAY': 'CLIENTE'}, inplace=True)
-    df_display['Fatturato_Anagrafica'] = df_display['Fatturato_Anagrafica'].apply(format_euro)
-    df_display['Fatturato_Ordini'] = df_display['Fatturato_Ordini'].apply(format_euro)
+    df_display['Fatturato_Anagrafica'] = df_display['Fatturato_Anagrafica'].apply(format_euro_robust)
+    df_display['Fatturato_Ordini'] = df_display['Fatturato_Ordini'].apply(format_euro_robust)
     df_display['KG_Ordinati'] = df_display['KG_Ordinati'].apply(lambda x: f"{x:,.2f} Kg".replace(",", "#").replace(".", ",").replace("#", "."))
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
@@ -407,7 +406,7 @@ if clienti_selezionati:
                 st.divider()
                 st.subheader("Andamento Fatturato Annuale (da Anagrafica)")
                 fatturato_annuale = dati_cliente.groupby('ANNO')['FATTURATO'].sum().sort_index()
-                fig_bar = go.Figure(data=[go.Bar(x=fatturato_annuale.index, y=fatturato_annuale.values, text=[format_euro(v) for v in fatturato_annuale.values], textposition='auto')])
+                fig_bar = go.Figure(data=[go.Bar(x=fatturato_annuale.index, y=fatturato_annuale.values, text=[format_euro_robust(v) for v in fatturato_annuale.values], textposition='auto')])
                 st.plotly_chart(fig_bar, use_container_width=True)
 
     with tab_ordini:
@@ -424,8 +423,8 @@ if clienti_selezionati:
                 prezzo_medio_kg = (total_fatturato_ordini / total_kg) if total_kg > 0 else 0
                 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
                 kpi1.metric("Kg Totali (Aggregati)", f"{total_kg:,.2f} Kg".replace(",", "."))
-                kpi2.metric("Fatturato Ordini (Aggregato)", format_euro(total_fatturato_ordini))
-                kpi3.metric("Prezzo Medio Kg (Aggregato)", f"{format_euro(prezzo_medio_kg)} /Kg")
+                kpi2.metric("Fatturato Ordini (Aggregato)", format_euro_robust(total_fatturato_ordini))
+                kpi3.metric("Prezzo Medio Kg (Aggregato)", f"{format_euro_robust(prezzo_medio_kg)} /Kg")
                 kpi4.metric("N. Righe Ordine (Aggregate)", f"{len(ordini_selezionati)}")
                 st.divider()
 
@@ -456,7 +455,7 @@ if clienti_selezionati:
                             # Formattazione colonna Fatturato se esiste
                             if 'Totale_Fatturato' in df_agg.columns:
                                 df_display = df_agg.copy()
-                                df_display['Totale_Fatturato'] = df_display['Totale_Fatturato'].apply(format_euro)
+                                df_display['Totale_Fatturato'] = df_display['Totale_Fatturato'].apply(format_euro_robust)
                                 st.dataframe(df_display, use_container_width=True, hide_index=True)
                             else:
                                 st.dataframe(df_agg, use_container_width=True, hide_index=True)
