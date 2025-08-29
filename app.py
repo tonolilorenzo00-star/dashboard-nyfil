@@ -242,7 +242,7 @@ if not df_filtrato.empty:
     revenue_italia = df_filtrato[df_filtrato['PAESE'] == 'Italia']['FATTURATO'].sum()
     quota_italia = (revenue_italia / total_revenue * 100) if total_revenue > 0 else 0
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.metric("Totale Fatturato", format_euro(total_revenue))
+    kpi1.metric("Totale Fatturato (da anagrafica)", format_euro(total_revenue))
     kpi2.metric("Quota Italia", f"{quota_italia:.1f}%")
     kpi3.metric("Quota Estero", f"{100 - quota_italia:.1f}%")
     kpi4.metric("N. Clienti nel filtro", f"{df_filtrato['CLIENTE'].nunique()}")
@@ -252,14 +252,19 @@ if not df_filtrato.empty:
     df_ranking = df_filtrato.groupby('CLIENTE').agg(Fatturato_Anagrafica=('FATTURATO', 'sum'), PAESE=('PAESE', 'first')).reset_index()
     if not df_ordini.empty and anni_selezionati:
         ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
-        df_ordini_agg = ordini_filtrati.groupby('nome_cliente').agg(KG_Ordinati=('KG', 'sum')).reset_index()
+        df_ordini_agg = ordini_filtrati.groupby('nome_cliente').agg(
+            KG_Ordinati=('KG', 'sum'),
+            Fatturato_Ordini=('FATTURATO_ORDINE', 'sum')
+        ).reset_index()
         df_ranking = pd.merge(df_ranking, df_ordini_agg, left_on='CLIENTE', right_on='nome_cliente', how='left').fillna(0)
     else:
         df_ranking['KG_Ordinati'] = 0
+        df_ranking['Fatturato_Ordini'] = 0
     
     df_ranking = df_ranking.sort_values('Fatturato_Anagrafica', ascending=False)
-    df_display = df_ranking[['CLIENTE', 'PAESE', 'Fatturato_Anagrafica', 'KG_Ordinati']].copy()
+    df_display = df_ranking[['CLIENTE', 'PAESE', 'Fatturato_Anagrafica', 'Fatturato_Ordini', 'KG_Ordinati']].copy()
     df_display['Fatturato_Anagrafica'] = df_display['Fatturato_Anagrafica'].apply(format_euro)
+    df_display['Fatturato_Ordini'] = df_display['Fatturato_Ordini'].apply(format_euro)
     df_display['KG_Ordinati'] = df_display['KG_Ordinati'].apply(lambda x: f"{x:,.2f} Kg".replace(",", "#").replace(".", ",").replace("#", "."))
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
@@ -409,12 +414,25 @@ if clienti_selezionati:
                             csv = df_agg.to_csv(index=False, sep=';', decimal=',', encoding='latin1')
                             st.download_button(f"📥 Export {title}", csv, f"{filename_prefix}_{cliente}.csv", "text/csv", key=f"btn_{filename_prefix}_{key_suffix}")
 
-                        agg_articolo_full = ordini_cliente_singolo.groupby('ARTICOLO').agg(Totale_Kg=('KG', 'sum')).reset_index().sort_values('Totale_Kg', ascending=False)
+                        # Aggiunta colonna FATTURATO_ORDINE alle aggregazioni
+                        agg_articolo_full = ordini_cliente_singolo.groupby('ARTICOLO').agg(
+                            Totale_Kg=('KG', 'sum'),
+                            Totale_Fatturato=('FATTURATO_ORDINE', 'sum')
+                        ).reset_index().sort_values('Totale_Kg', ascending=False)
+                        agg_articolo_full['Totale_Fatturato'] = agg_articolo_full['Totale_Fatturato'].apply(format_euro)
                         display_agg_table(agg_articolo_full, "Dettaglio Analisi per Articolo", "analisi_articolo", cliente)
 
-                        agg_colore_full = ordini_cliente_singolo.groupby('COLORE').agg(Totale_Kg=('KG', 'sum')).reset_index().sort_values('Totale_Kg', ascending=False)
+                        agg_colore_full = ordini_cliente_singolo.groupby('COLORE').agg(
+                            Totale_Kg=('KG', 'sum'),
+                            Totale_Fatturato=('FATTURATO_ORDINE', 'sum')
+                        ).reset_index().sort_values('Totale_Kg', ascending=False)
+                        agg_colore_full['Totale_Fatturato'] = agg_colore_full['Totale_Fatturato'].apply(format_euro)
                         display_agg_table(agg_colore_full, "Dettaglio Analisi per Colore", "analisi_colore", cliente)
 
-                        agg_articolo_colore_full = ordini_cliente_singolo.groupby(['ARTICOLO', 'COLORE']).agg(Totale_Kg=('KG', 'sum')).reset_index().sort_values('Totale_Kg', ascending=False)
+                        agg_articolo_colore_full = ordini_cliente_singolo.groupby(['ARTICOLO', 'COLORE']).agg(
+                            Totale_Kg=('KG', 'sum'),
+                            Totale_Fatturato=('FATTURATO_ORDINE', 'sum')
+                        ).reset_index().sort_values('Totale_Kg', ascending=False)
+                        agg_articolo_colore_full['Totale_Fatturato'] = agg_articolo_colore_full['Totale_Fatturato'].apply(format_euro)
                         display_agg_table(agg_articolo_colore_full, "Dettaglio Analisi per Articolo e Colore", "analisi_articolo_colore", cliente)
 
