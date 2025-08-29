@@ -47,7 +47,6 @@ def format_euro_robust(value):
     try:
         if pd.isna(value) or not isinstance(value, (int, float)):
             return "N/A"
-        # Formatta il numero con separatore delle migliaia e due decimali, poi inverte i separatori
         return f"€ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except (TypeError, ValueError):
         return "N/A"
@@ -272,24 +271,19 @@ if not df_filtrato.empty:
     if not df_ordini.empty and anni_selezionati:
         ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
         df_ordini_agg = ordini_filtrati.groupby('nome_cliente').agg(
-            KG_Ordinati=('KG', 'sum'),
-            Fatturato_Ordini=('FATTURATO_ORDINE', 'sum')
+            KG_Ordinati=('KG', 'sum')
         ).reset_index()
         df_ranking = pd.merge(df_ranking, df_ordini_agg, left_on='CLIENTE', right_on='nome_cliente', how='left')
-        df_ranking[['KG_Ordinati', 'Fatturato_Ordini']] = df_ranking[['KG_Ordinati', 'Fatturato_Ordini']].fillna(0)
-
+        df_ranking['KG_Ordinati'] = df_ranking['KG_Ordinati'].fillna(0)
     else:
         df_ranking['KG_Ordinati'] = 0
-        df_ranking['Fatturato_Ordini'] = 0
     
     df_ranking = df_ranking.sort_values('Fatturato_Anagrafica', ascending=False)
-    # Rendi i nomi dei clienti in maiuscolo per la visualizzazione
     df_ranking['CLIENTE_DISPLAY'] = df_ranking['CLIENTE'].str.upper()
 
-    df_display = df_ranking[['CLIENTE_DISPLAY', 'PAESE', 'Fatturato_Anagrafica', 'Fatturato_Ordini', 'KG_Ordinati']].copy()
+    df_display = df_ranking[['CLIENTE_DISPLAY', 'PAESE', 'Fatturato_Anagrafica', 'KG_Ordinati']].copy()
     df_display.rename(columns={'CLIENTE_DISPLAY': 'CLIENTE'}, inplace=True)
     df_display['Fatturato_Anagrafica'] = df_display['Fatturato_Anagrafica'].apply(format_euro_robust)
-    df_display['Fatturato_Ordini'] = df_display['Fatturato_Ordini'].apply(format_euro_robust)
     df_display['KG_Ordinati'] = df_display['KG_Ordinati'].apply(lambda x: f"{x:,.2f} Kg".replace(",", "#").replace(".", ",").replace("#", "."))
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
@@ -299,7 +293,6 @@ with st.expander("Segmentazione Clienti (Basata sull'ultimo anno di valutazione)
     else:
         anno_segmentazione = anni_selezionati[0]
         all_evals = []
-        # Usa i clienti unici dal dataframe filtrato per la segmentazione
         clienti_unici_filtrati = df_filtrato['CLIENTE'].unique()
         for cliente in clienti_unici_filtrati:
             eval_data = load_evaluation(cliente, anno_segmentazione)
@@ -319,13 +312,11 @@ with st.expander("Segmentazione Clienti (Basata sull'ultimo anno di valutazione)
         else:
             st.warning(f"Nessuna valutazione trovata per l'anno {anno_segmentazione}.")
 
-# Usa i nomi dei clienti in maiuscolo anche per il selettore
 clienti_options = sorted(df_ranking['CLIENTE'].str.upper().unique())
 clienti_selezionati_upper = st.multiselect(
     "Seleziona uno o più clienti per visualizzare la scheda di dettaglio", 
     options=clienti_options
 )
-# Converte di nuovo in minuscolo per le operazioni interne
 clienti_selezionati = [c.lower() for c in clienti_selezionati_upper]
 
 # --- SCHEDA CLIENTE ---
@@ -390,7 +381,6 @@ if clienti_selezionati:
             with st.expander(f"Dati per {cliente.upper()}"):
                 dati_cliente = df_clienti[df_clienti['CLIENTE'] == cliente]
                 st.subheader("Anagrafica")
-                # Trova la riga più recente se l'anno di riferimento non è disponibile
                 if not dati_cliente[dati_cliente['ANNO'] == anno_riferimento].empty:
                     anagrafica = dati_cliente[dati_cliente['ANNO'] == anno_riferimento].iloc[0]
                 elif not dati_cliente.empty:
@@ -452,18 +442,26 @@ if clienti_selezionati:
 
                         def display_agg_table(df_agg, title, filename_prefix, key_suffix):
                             st.markdown(f"##### {title}")
-                            # Formattazione colonna Fatturato se esiste
+                            
+                            column_config = {
+                                "Totale_Kg": st.column_config.NumberColumn("Totale Kg", format="%.2f Kg")
+                            }
                             if 'Totale_Fatturato' in df_agg.columns:
-                                df_display = df_agg.copy()
-                                df_display['Totale_Fatturato'] = df_display['Totale_Fatturato'].apply(format_euro_robust)
-                                st.dataframe(df_display, use_container_width=True, hide_index=True)
-                            else:
-                                st.dataframe(df_agg, use_container_width=True, hide_index=True)
+                                column_config["Totale_Fatturato"] = st.column_config.NumberColumn(
+                                    "Totale Fatturato",
+                                    format="€ %.2f"
+                                )
+
+                            st.dataframe(
+                                df_agg, 
+                                use_container_width=True, 
+                                hide_index=True,
+                                column_config=column_config
+                            )
                             
                             csv = df_agg.to_csv(index=False, sep=';', decimal=',', encoding='latin1')
                             st.download_button(f"📥 Export {title}", csv, f"{filename_prefix}_{cliente}.csv", "text/csv", key=f"btn_{filename_prefix}_{key_suffix}")
 
-                        # Aggiunta colonna FATTURATO_ORDINE alle aggregazioni
                         agg_articolo_full = ordini_cliente_singolo.groupby('ARTICOLO').agg(
                             Totale_Kg=('KG', 'sum'),
                             Totale_Fatturato=('FATTURATO_ORDINE', 'sum')
