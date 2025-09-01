@@ -497,7 +497,6 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                         by_art_display['Fatturato'] = by_art_display['Fatturato'].apply(format_euro_robust)
                         by_art_display['€/Kg'] = by_art_display['€/Kg'].apply(lambda v: format_euro_robust(v).replace("€ ", "€ "))
                         st.dataframe(by_art_display, use_container_width=True, hide_index=True)
-
             else: # Confronta Anni
                 st.info("Modalità Confronto Anni: le tabelle mostrano i dati disaggregati per anno.")
                 for cliente in clienti_selezionati:
@@ -566,6 +565,99 @@ def page_stato_dati(df_clienti, df_ordini):
     else:
         st.info("Carica sia il file anagrafica che i file ordini per eseguire la diagnosi.")
 
+# --- NUOVA PAGINA: REPORT AVANZATI (Analisi Predittiva) ---
+def page_report_avanzati(df_ordini):
+    st.title("Report Avanzati — Analisi Predittiva per Articolo")
+
+    if df_ordini.empty or 'ARTICOLO' not in df_ordini.columns:
+        st.info("Nessun dato ordini disponibile o colonna 'ARTICOLO' assente.")
+        return
+
+    # Selettore singolo articolo
+    articoli = sorted([a for a in df_ordini['ARTICOLO'].dropna().unique() if str(a).strip() != ""])
+    if not articoli:
+        st.info("Nessun articolo disponibile.")
+        return
+
+    articolo_sel = st.selectbox("Seleziona un articolo", options=articoli, index=0)
+
+    # Serie storica Kg per anno
+    df_art = (
+        df_ordini[df_ordini['ARTICOLO'] == articolo_sel]
+        .assign(ANNO_NUM=pd.to_numeric(df_ordini['ANNO'], errors='coerce'))
+        .dropna(subset=['ANNO_NUM'])
+        .groupby('ANNO_NUM', as_index=False)['KG'].sum()
+        .sort_values('ANNO_NUM')
+    )
+
+    if df_art.empty:
+        st.warning("Nessun dato storico disponibile per questo articolo.")
+        return
+
+    # Regressione lineare (y = m*x + q)
+    x = df_art['ANNO_NUM'].values.astype(float)
+    y = df_art['KG'].values.astype(float)
+    if len(df_art) >= 2:
+        m, q = np.polyfit(x, y, 1)
+        # Estendiamo la linea al prossimo anno per dare indicazione futura
+        x_min, x_max = x.min(), x.max() + 1  # +1 anno futuro
+        x_line = np.linspace(x_min, x_max, 100)
+        y_line = m * x_line + q
+        slope_desc = "in crescita" if m > 0 else ("in calo" if m < 0 else "stabile")
+    else:
+        # Con un solo punto non posso stimare una retta: mostro solo il dato
+        m, q, x_line, y_line = 0, y[0], x, y
+        slope_desc = "dati insufficienti per trend"
+
+    # Grafico Plotly
+    fig = go.Figure()
+
+    # Storico reale
+    fig.add_trace(go.Scatter(
+        x=df_art['ANNO_NUM'], y=df_art['KG'],
+        mode='markers+lines',
+        name='Storico Kg',
+        hovertemplate="Anno %{x}<br>Kg %{y:,.2f}<extra></extra>"
+    ))
+
+    # Trend lineare + estensione 1 anno
+    if len(df_art) >= 2:
+        fig.add_trace(go.Scatter(
+            x=x_line, y=y_line,
+            mode='lines',
+            name='Trend (regressione lineare)',
+            line=dict(dash='dash')
+        ))
+
+        # Punto previsto per l'anno successivo
+        next_year = int(np.max(x)) + 1
+        y_next = float(m * next_year + q)
+        fig.add_trace(go.Scatter(
+            x=[next_year], y=[y_next],
+            mode='markers',
+            name='Proiezione anno +1',
+            marker=dict(symbol='diamond-open', size=10)
+        ))
+
+    fig.update_layout(
+        title=f"Andamento Kg per Articolo: {articolo_sel}",
+        xaxis_title="Anno",
+        yaxis_title="Kg",
+        hovermode="x unified"
+    )
+
+    # KPI sintetici
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Anni coperti", f"{df_art['ANNO_NUM'].nunique()}")
+    col_b.metric("Kg totali", f"{df_art['KG'].sum():,.2f}".replace(",", "."))
+    col_c.metric("Tendenza", slope_desc.capitalize())
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    if len(df_art) >= 2:
+        st.caption("La linea tratteggiata rappresenta la regressione lineare sui dati storici; il rombo mostra la proiezione al prossimo anno (indicativa).")
+
+
 # --- LOGICA PRINCIPALE E NAVIGAZIONE ---
 init_db()
 
@@ -589,7 +681,7 @@ with st.sidebar:
     st.title("Navigazione")
     pagina_selezionata = st.radio(
         "Scegli una pagina:",
-        ("Dashboard", "Elenco Clienti", "Analisi Dettagliata", "Stato dei Dati")
+        ("Dashboard", "Elenco Clienti", "Analisi Dettagliata", "Report Avanzati", "Stato dei Dati")
     )
 
     st.divider()
@@ -606,5 +698,7 @@ elif pagina_selezionata == "Elenco Clienti":
     page_elenco_clienti(df_clienti, df_ordini, anni_selezionati_globali, paese_selezionato, analysis_mode)
 elif pagina_selezionata == "Analisi Dettagliata":
     page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selezionati_globali, analysis_mode)
+elif pagina_selezionata == "Report Avanzati":
+    page_report_avanzati(df_ordini)
 elif pagina_selezionata == "Stato dei Dati":
     page_stato_dati(df_clienti, df_ordini)
