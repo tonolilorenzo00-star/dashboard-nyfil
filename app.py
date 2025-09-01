@@ -297,6 +297,7 @@ def page_elenco_clienti(df_clienti, df_ordini, anni_selezionati, paese_seleziona
             df_compare['CLIENTE'] = df_compare['CLIENTE'].str.upper()
             
             st.dataframe(df_compare[['CLIENTE', 'PAESE'] + col_order], use_container_width=True, hide_index=True)
+            clienti_options = sorted(df_compare['CLIENTE'].unique())
 
         with st.expander("Segmentazione Clienti (Basata sull'ultimo anno di valutazione)"):
             if not anni_selezionati:
@@ -326,7 +327,6 @@ def page_elenco_clienti(df_clienti, df_ordini, anni_selezionati, paese_seleziona
 def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selezionati_globali, analysis_mode):
     st.title("Analisi Dettagliata Cliente")
     
-    # Sposta il selettore cliente qui
     clienti_options = sorted(df_clienti['CLIENTE'].str.upper().unique())
     clienti_selezionati_upper = st.multiselect(
         "Seleziona uno o più clienti per l'analisi", 
