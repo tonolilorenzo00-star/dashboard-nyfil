@@ -9,6 +9,10 @@ import glob
 import re
 import base64
 
+# NEW: LLM
+from tenacity import retry, wait_random_exponential, stop_after_attempt
+from openai import OpenAI
+
 # --- CONFIGURAZIONE PAGINA E COSTANTI ---
 st.set_page_config(page_title="Analisi Clienti Nyfil", layout="wide")
 
@@ -94,6 +98,15 @@ def init_db():
                 q6 INTEGER, q7 INTEGER, q8 INTEGER, q9 INTEGER, q10 INTEGER,
                 q11 INTEGER, q12 INTEGER, q13 INTEGER, q14 INTEGER, q15 INTEGER,
                 updated_at TEXT, PRIMARY KEY (cliente, anno)
+            );
+        """)
+        # NEW: storico insight IA
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_insights (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cliente TEXT, anno_rif TEXT,
+                digest TEXT, output TEXT,
+                created_at TEXT
             );
         """)
 
@@ -199,6 +212,173 @@ def get_matrix_quadrant(x, y):
     if x > 3 and y <= 3: return "Specialista Redditizio"
     if x <= 3 and y > 3: return "Amico a Basso Impatto"
     return "Cliente Marginale"
+
+# ------------------ LLM UTILS ------------------
+
+@st.cache_resource
+def get_openai_client():
+    if "OPENAI_API_KEY" not in st.secrets:
+        st.warning("Manca OPENAI_API_KEY nei secrets.")
+        return None
+    return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+MODEL_NAME = st.secrets.get("MODEL_NAME", "gpt-4o-mini")
+TEMPERATURE = float(st.secrets.get("MODEL_TEMPERATURE", 0.2))
+
+def _truncate(s: str, max_chars: int = 15000) -> str:
+    s = str(s)
+    return s if len(s) <= max_chars else s[:max_chars] + "\n... [troncato]"
+
+@retry(wait=wait_random_exponential(min=1, max=6), stop=stop_after_attempt(3))
+def call_llm(system_prompt: str, user_prompt: str) -> str:
+    client = get_openai_client()
+    if client is None:
+        return "⚠️ Configurare OPENAI_API_KEY nei secrets."
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        temperature=TEMPERATURE,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": _truncate(user_prompt)}
+        ]
+    )
+    return resp.choices[0].message.content.strip()
+
+def build_client_ai_digest(cliente: str, anni_sel: list, anno_rif: str,
+                           df_clienti: pd.DataFrame, df_ordini: pd.DataFrame) -> str:
+    anni_sel = [str(a) for a in anni_sel] if anni_sel else []
+    # Valutazione
+    eval_data = load_evaluation(cliente, anno_rif)
+    tot, val_ec, val_rel = calculate_scores(eval_data)
+
+    # Fatturato cliente per anni selezionati
+    fatt_cli = (
+        df_clienti[(df_clienti['CLIENTE'] == cliente) &
+                   (df_clienti['ANNO'].isin(anni_sel))]
+        .groupby('ANNO', as_index=False)['FATTURATO'].sum()
+        .sort_values('ANNO')
+    )
+    fatt_tot_cli = float(fatt_cli['FATTURATO'].sum()) if not fatt_cli.empty else 0.0
+
+    # Ordini cliente
+    ord_cli = df_ordini[(df_ordini['nome_cliente'] == cliente) &
+                        (df_ordini['ANNO'].isin(anni_sel))]
+    kg_tot_cli = float(ord_cli['KG'].sum()) if not ord_cli.empty else 0.0
+    fatt_ord_cli = float(ord_cli['FATTURATO_ORDINE'].sum()) if not ord_cli.empty else 0.0
+    prezzo_medio_cli = (fatt_ord_cli / kg_tot_cli) if kg_tot_cli > 0 else 0.0
+
+    # Trend Kg (retta)
+    trend_txt = "n.d."
+    if not ord_cli.empty:
+        df_trend = (ord_cli.assign(ANNO_NUM=pd.to_numeric(ord_cli['ANNO'], errors='coerce'))
+                           .dropna(subset=['ANNO_NUM'])
+                           .groupby('ANNO_NUM', as_index=False)['KG'].sum()
+                           .sort_values('ANNO_NUM'))
+        if len(df_trend) >= 2:
+            m, q = np.polyfit(df_trend['ANNO_NUM'].values.astype(float),
+                              df_trend['KG'].values.astype(float), 1)
+            trend_txt = "crescita" if m > 0 else ("calo" if m < 0 else "stabile")
+
+    # Top articoli / colori
+    top_art = (ord_cli.groupby('ARTICOLO')['KG'].sum()
+               .sort_values(ascending=False).head(5).to_dict())
+    top_col = (ord_cli.groupby('COLORE')['KG'].sum()
+               .sort_values(ascending=False).head(3).to_dict())
+
+    # Benchmark "altri clienti"
+    altri = df_clienti[(df_clienti['ANNO'].isin(anni_sel)) & (df_clienti['CLIENTE'] != cliente)]
+    fatt_media_altri = float(altri.groupby('CLIENTE')['FATTURATO'].sum().mean()) if not altri.empty else 0.0
+    ord_altri = df_ordini[(df_ordini['ANNO'].isin(anni_sel)) & (df_ordini['nome_cliente'] != cliente)]
+    kg_altri = float(ord_altri['KG'].sum()) if not ord_altri.empty else 0.0
+    fatt_altri = float(ord_altri['FATTURATO_ORDINE'].sum()) if not ord_altri.empty else 0.0
+    prezzo_medio_altri = (fatt_altri / kg_altri) if kg_altri > 0 else 0.0
+
+    digest = {
+        "cliente": cliente.upper(),
+        "anni_riferimento": anni_sel,
+        "anno_valutazione": str(anno_rif),
+        "valutazione": {
+            "totale": round(tot, 2),
+            "valore_economico_media": round(val_ec, 2),
+            "valore_relazionale_media": round(val_rel, 2)
+        },
+        "fatturato_cliente": {
+            "per_anno": {str(r['ANNO']): float(r['FATTURATO']) for _, r in fatt_cli.iterrows()} if not fatt_cli.empty else {},
+            "totale": round(fatt_tot_cli, 2)
+        },
+        "ordini_cliente": {
+            "kg_totali": round(kg_tot_cli, 2),
+            "fatturato_ordini_tot": round(fatt_ord_cli, 2),
+            "prezzo_medio_kg": round(prezzo_medio_cli, 4),
+            "trend_kg": trend_txt,
+            "top_articoli_kg": {str(k): float(v) for k, v in top_art.items()},
+            "top_colori_kg": {str(k): float(v) for k, v in top_col.items()}
+        },
+        "benchmark_others": {
+            "fatturato_medio_cliente": round(fatt_media_altri, 2),
+            "prezzo_medio_kg": round(prezzo_medio_altri, 4)
+        }
+    }
+    # Compatto come testo leggibile
+    lines = []
+    lines.append(f"Cliente: {digest['cliente']}")
+    lines.append(f"Anni di riferimento: {', '.join(digest['anni_riferimento']) or 'tutti'}  | Anno valutazione: {digest['anno_valutazione']}")
+    v = digest['valutazione']
+    lines.append(f"Valutazione → Totale: {v['totale']} | Val.Economico: {v['valore_economico_media']} | Val.Relazionale: {v['valore_relazionale_media']}")
+    fa = digest['fatturato_cliente']
+    lines.append(f"Fatturato (tot): {format_euro_robust(fa['totale'])}  | Per anno: { {k: format_euro_robust(v) for k,v in fa['per_anno'].items()} }")
+    oc = digest['ordini_cliente']
+    lines.append(f"Ordini → Kg: {oc['kg_totali']:.2f} | Fatt: {format_euro_robust(oc['fatturato_ordini_tot'])} | €/Kg: {oc['prezzo_medio_kg']:.3f} | Trend: {oc['trend_kg']}")
+    lines.append(f"Top articoli (Kg): {oc['top_articoli_kg']}")
+    lines.append(f"Top colori (Kg): {oc['top_colori_kg']}")
+    b = digest['benchmark_others']
+    lines.append(f"Benchmark altri → Fatturato medio cliente: {format_euro_robust(b['fatturato_medio_cliente'])} | €/Kg medio: {b['prezzo_medio_kg']:.3f}")
+    return "\n".join(lines)
+
+def build_global_digest(df_clienti: pd.DataFrame, df_ordini: pd.DataFrame,
+                        anni_sel: list, paese_sel: str, top_n: int = 10) -> str:
+    anni_sel = [str(a) for a in anni_sel] if anni_sel else []
+    dfc = df_clienti[df_clienti['ANNO'].isin(anni_sel)] if anni_sel else df_clienti.copy()
+    if paese_sel != "Tutti":
+        dfc = dfc[dfc['PAESE'] == paese_sel]
+
+    total_revenue = float(dfc['FATTURATO'].sum()) if not dfc.empty else 0.0
+    quota_italia = float(dfc[dfc['PAESE'] == 'Italia']['FATTURATO'].sum() / total_revenue * 100) if total_revenue > 0 else 0.0
+    n_clienti = int(dfc['CLIENTE'].nunique()) if not dfc.empty else 0
+
+    # Top clienti per fatturato
+    top_clients = (dfc.groupby('CLIENTE')['FATTURATO'].sum()
+                      .sort_values(ascending=False).head(top_n))
+
+    # Kg per cliente dal subset ordini coerente con anni selezionati
+    dfo = df_ordini[df_ordini['ANNO'].isin(anni_sel)] if anni_sel else df_ordini.copy()
+    kg_by_client = dfo.groupby('nome_cliente')['KG'].sum()
+
+    # Top articoli per Kg (globale con gli stessi anni)
+    top_art = (dfo.groupby('ARTICOLO')['KG'].sum()
+               .sort_values(ascending=False).head(10))
+
+    lines = []
+    lines.append(f"FILTRI → Anni: {', '.join(anni_sel) or 'tutti'} | Paese: {paese_sel}")
+    lines.append(f"KPI → Fatturato Totale: {format_euro_robust(total_revenue)} | Quota Italia: {quota_italia:.1f}% | N° Clienti: {n_clienti}")
+    lines.append("Top Clienti (Fatturato / Kg):")
+    for cli, fatt in top_clients.items():
+        kg = float(kg_by_client.get(cli, 0))
+        lines.append(f" - {cli.upper()}: {format_euro_robust(float(fatt))} | {kg:,.2f} Kg".replace(",", "."))
+    lines.append(f"Top Articoli per Kg: {dict(top_art)}")
+    return "\n".join(lines)
+
+def save_ai_output(cliente: str, anno_rif: str, digest: str, output: str):
+    try:
+        conn = get_db_connection()
+        with conn:
+            conn.execute(
+                "INSERT INTO ai_insights (cliente, anno_rif, digest, output, created_at) VALUES (?, ?, ?, ?, ?)",
+                (cliente, anno_rif, digest, output, datetime.now().isoformat())
+            )
+    except sqlite3.OperationalError:
+        # ad es. DB read-only su Streamlit Cloud free
+        pass
 
 # --- PAGINE DELL'APPLICAZIONE ---
 
@@ -372,6 +552,31 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                         st.cache_data.clear()
                         st.rerun()
                 evals_data[cliente] = load_evaluation(cliente, anno_riferimento_scheda)
+
+                # --- NEW: Analizza con IA ---
+                st.markdown("---")
+                if st.button("🔎 Analizza con IA", key=f"ai_analyze_{cliente}_{anno_riferimento_scheda}"):
+                    with st.spinner("Sto analizzando i dati con l'IA..."):
+                        digest = build_client_ai_digest(cliente, anni_scheda_selezionati, anno_riferimento_scheda, df_clienti, df_ordini)
+                        system = (
+                            "Sei un business analyst per un'azienda B2B che vende filati in nylon."
+                            " Usa SOLO le informazioni fornite. Rispondi in italiano, conciso, puntato."
+                            " Struttura l'output in queste sezioni: "
+                            "1) Sintesi (3 bullet) "
+                            "2) Andamento & Mix (3 bullet) "
+                            "3) Confronto con pari (2 bullet) "
+                            "4) Opportunità commerciali (3 bullet) "
+                            "5) Rischi (2 bullet) "
+                            "6) Azioni consigliate 30/60/90 giorni (liste brevi)."
+                        )
+                        user = f"DATI CLIENTE (digest compresso):\n{digest}"
+                        try:
+                            out = call_llm(system, user)
+                        except Exception as e:
+                            out = f"Errore chiamata IA: {e}"
+                        st.markdown("#### Risultato IA")
+                        st.markdown(out)
+                        save_ai_output(cliente, anno_riferimento_scheda, digest, out)
 
         st.divider()
         st.subheader("Analisi Strategica Comparata")
@@ -558,7 +763,7 @@ def page_stato_dati(df_clienti, df_ordini):
         if clienti_orfani:
             st.error(f"Trovati {len(clienti_orfani)} clienti 'orfani'!")
             st.write("Questi clienti sono presenti nei file degli ordini, ma **NON** nel file `elenco clienti.csv` (o i nomi non corrispondono esattamente). Questo è il motivo per cui il loro fatturato non viene visualizzato.")
-            st.write("**Azione richiesta:** Correggi i nomi di questi clienti nel file `elenco clienti.csv` per farli corrispondere esattamente a come appaiono qui sotto, poi ricarica il file su GitHub.")
+            st.write("**Azione richiesta:** Correggi i nomi di questi clienti nel file anagrafico per farli corrispondere esattamente, poi ricarica il file su GitHub.")
             st.dataframe(sorted([c.upper() for c in clienti_orfani]), use_container_width=True)
         else:
             st.success("Ottimo! Tutti i clienti presenti negli ordini hanno una corrispondenza nel file anagrafico.")
@@ -690,6 +895,31 @@ with st.sidebar:
     paese_selezionato = st.selectbox("Paese", options=["Tutti", "Italia", "Estero"])
     analysis_mode = st.radio("Modalità di Analisi Annuale", ["Aggrega Anni", "Confronta Anni"], key='analysis_mode_selector')
 
+    # --- NEW: Copilot IA in sidebar ---
+    st.divider()
+    st.header("🤖 Copilot IA (beta)")
+    use_filters = st.checkbox("Usa filtri correnti", value=True)
+    domanda = st.text_area("Fai una domanda sulla dashboard:", key="copilot_q", height=80, placeholder="Es. Quali sono i 3 clienti più profittevoli in Veneto?")
+    if st.button("Chiedi al Copilot"):
+        if not domanda.strip():
+            st.warning("Scrivi una domanda.")
+        else:
+            with st.spinner("Sto preparando i dati e interrogando l'IA..."):
+                anni_ctx = anni_selezionati_globali if use_filters else anni_disponibili
+                paese_ctx = paese_selezionato if use_filters else "Tutti"
+                digest = build_global_digest(df_clienti, df_ordini, anni_ctx, paese_ctx, top_n=10)
+                system = (
+                    "Sei un assistente analitico per una dashboard B2B del settore filati in nylon."
+                    " Rispondi SOLO usando i dati forniti nel digest. Se servono calcoli, spiega in 1 riga come li fai."
+                    " Stile: sintetico, puntato, in italiano. Se l'utente è ambiguo, fai una breve assunzione esplicita."
+                )
+                user = f"DOMANDA: {domanda}\n\nDIGEST:\n{digest}"
+                try:
+                    answer = call_llm(system, user)
+                except Exception as e:
+                    answer = f"Errore chiamata IA: {e}"
+                st.markdown("**Risposta Copilot:**")
+                st.markdown(answer)
 
 # --- ROUTING DELLE PAGINE ---
 if pagina_selezionata == "Dashboard":
