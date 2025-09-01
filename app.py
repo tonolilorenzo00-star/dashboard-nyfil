@@ -105,14 +105,20 @@ def load_clients_df(uploaded_file=None) -> pd.DataFrame:
         
         if 'CLIENTE' in df.columns:
             df['CLIENTE'] = df['CLIENTE'].apply(clean_customer_name)
-            
+        
+        # FIX DEFINITIVO: Gestisce anni singoli e multipli (es. "23/24")
+        df['ANNO_ORIG'] = df['ANNO_ORIG'].astype(str).str.split('/')
+        df = df.explode('ANNO_ORIG')
         df['ANNO'] = df['ANNO_ORIG'].apply(normalize_year)
+
         df['FATTURATO'] = df['IMPONIBILE'].apply(parse_decimal_string)
         df['PAESE'] = df.apply(lambda row: detect_country(row.get('CAP', ''), row.get('PROVINCIA', '')), axis=1)
+        
         agg_cols = {k: 'first' for k in ['VIA', 'CITTA', 'CAP', 'PROVINCIA', 'TITOLARE', 'EMAIL', 'PAESE']}
         agg_cols['FATTURATO'] = 'sum'
         cols_to_agg = {k: v for k, v in agg_cols.items() if k in df.columns}
         return df.groupby(['CLIENTE', 'ANNO']).agg(cols_to_agg).reset_index()
+
     except Exception as e:
         st.error(f"Errore lettura file clienti: {e}")
         return pd.DataFrame()
@@ -232,7 +238,12 @@ if df_clienti.empty:
     st.stop()
 
 # --- HOME PAGE ---
-anni_disponibili = sorted(df_clienti['ANNO'].unique(), reverse=True)
+anni_clienti = df_clienti['ANNO'].unique() if not df_clienti.empty else []
+anni_ordini = df_ordini['ANNO'].unique() if not df_ordini.empty else []
+tutti_gli_anni = pd.concat([pd.Series(anni_clienti), pd.Series(anni_ordini)]).unique()
+anni_disponibili = sorted([anno for anno in tutti_gli_anni if pd.notna(anno)], reverse=True)
+
+
 col1, col2 = st.columns(2)
 anni_selezionati_globali = col1.multiselect("Filtra per Anno (Globale)", options=anni_disponibili, default=anni_disponibili)
 paese_selezionato = col2.selectbox("Filtra per Paese", options=["Tutti", "Italia", "Estero"])
