@@ -463,8 +463,51 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
 
 def page_stato_dati(df_clienti, df_ordini):
     st.title("Stato dei Dati e Diagnostica")
-    # ... (Codice non modificato)
-    pass
+    st.header("1. Controllo File")
+    st.write("Questi sono i file che l'applicazione ha trovato nella cartella `data/`:")
+    files_trovati = [p.name for p in DATA_DIR.glob('*')]
+    if files_trovati:
+        st.dataframe(files_trovati, use_container_width=True)
+    else:
+        st.error("Nessun file trovato nella cartella 'data'. Assicurati di aver caricato i file su GitHub.")
+
+    st.header("2. Analisi del Caricamento")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Anagrafica Clienti (`elenco clienti.csv`)")
+        if not df_clienti.empty:
+            st.metric("Righe totali caricate (dopo espansione anni)", len(df_clienti))
+            st.metric("Clienti unici trovati", df_clienti['CLIENTE'].nunique())
+        else:
+            st.warning("Il file dell'anagrafica clienti non è stato caricato o è vuoto.")
+
+    with col2:
+        st.subheader("File Ordini (`ordini_*.csv`)")
+        if not df_ordini.empty:
+            st.metric("Righe totali caricate", len(df_ordini))
+            st.metric("Clienti unici trovati", df_ordini['nome_cliente'].nunique())
+        else:
+            st.warning("Nessun file degli ordini caricato o sono tutti vuoti.")
+            
+    st.header("3. Diagnosi delle Corrispondenze")
+    if not df_clienti.empty and not df_ordini.empty:
+        clienti_anagrafica = set(df_clienti['CLIENTE'].unique())
+        clienti_ordini = set(df_ordini['nome_cliente'].unique())
+        
+        clienti_corrispondenti = clienti_anagrafica.intersection(clienti_ordini)
+        clienti_orfani = clienti_ordini - clienti_anagrafica
+
+        st.metric("Numero di clienti che corrispondono tra Anagrafica e Ordini", len(clienti_corrispondenti))
+        
+        if clienti_orfani:
+            st.error(f"Trovati {len(clienti_orfani)} clienti 'orfani'!")
+            st.write("Questi clienti sono presenti nei file degli ordini, ma **NON** nel file `elenco clienti.csv` (o i nomi non corrispondono esattamente). Questo è il motivo per cui il loro fatturato non viene visualizzato.")
+            st.write("**Azione richiesta:** Correggi i nomi di questi clienti nel file `elenco clienti.csv` per farli corrispondere esattamente a come appaiono qui sotto, poi ricarica il file su GitHub.")
+            st.dataframe(sorted([c.upper() for c in clienti_orfani]), use_container_width=True)
+        else:
+            st.success("Ottimo! Tutti i clienti presenti negli ordini hanno una corrispondenza nel file anagrafico.")
+    else:
+        st.info("Carica sia il file anagrafica che i file ordini per eseguire la diagnosi.")
 
 # --- LOGICA PRINCIPALE E NAVIGAZIONE ---
 init_db()
