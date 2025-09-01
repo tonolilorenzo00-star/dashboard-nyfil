@@ -13,7 +13,11 @@ import base64
 st.set_page_config(page_title="Analisi Clienti Nyfil", layout="wide")
 
 # FIX DEFINITIVO: Usa percorsi assoluti basati sulla posizione dello script
-BASE_DIR = Path(__file__).parent
+try:
+    BASE_DIR = Path(__file__).parent
+except NameError:
+    BASE_DIR = Path.cwd()
+
 DATA_DIR = BASE_DIR / "data"
 DB_FILE = DATA_DIR / "app.db"
 CLIENTS_CSV = DATA_DIR / "elenco clienti.csv"
@@ -100,7 +104,8 @@ def load_clients_df(uploaded_file=None) -> pd.DataFrame:
     try:
         df = pd.read_csv(source, sep=';', encoding='latin1', low_memory=False)
         df.columns = [col.strip().lower() for col in df.columns]
-        required_cols = {"nome_cliente": "CLIENTE", "via": "VIA", "città": "CITTA", "cap": "CAP", "provincia": "PROVINCIA", "titolare_azienda": "TITOLARE", "recapiti_mail": "EMAIL", "anno": "ANNO_ORIG", "imponibile": "IMPONIBILE"}
+        # FIX: Gestisce sia 'nome_cliente' che il typo 'nome_clietne'
+        required_cols = {"nome_clietne": "CLIENTE", "nome_cliente": "CLIENTE", "via": "VIA", "città": "CITTA", "cap": "CAP", "provincia": "PROVINCIA", "titolare_azienda": "TITOLARE", "recapiti_mail": "EMAIL", "anno": "ANNO_ORIG", "imponibile": "IMPONIBILE"}
         df.rename(columns=required_cols, inplace=True)
         
         if 'CLIENTE' in df.columns:
@@ -178,7 +183,7 @@ def page_dashboard(df_clienti, df_ordini, anni_selezionati, paese_selezionato):
     if not df_filtrato.empty:
         total_revenue = df_filtrato['FATTURATO'].sum()
         revenue_italia = df_filtrato[df_filtrato['PAESE'] == 'Italia']['FATTURATO'].sum()
-        quota_italia = (revenue_italia / total_revenue * 100) if total_revenue > 0 else 0
+        quota_italia = (total_revenue / total_revenue * 100) if total_revenue > 0 else 0
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         kpi1.metric("Totale Fatturato", format_euro_robust(total_revenue))
         kpi2.metric("Quota Italia", f"{quota_italia:.1f}%")
