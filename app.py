@@ -8,6 +8,7 @@ import numpy as np
 import glob
 import re
 import json
+import hashlib  # NEW: per anonimizzazione
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 from openai import OpenAI
 
@@ -24,20 +25,18 @@ DB_FILE = DATA_DIR / "app.db"
 CLIENTS_CSV = DATA_DIR / "elenco clienti.csv"
 DATA_DIR.mkdir(exist_ok=True)
 
-# Province e regioni (espandibile)
+# Province e regioni
 PROVINCE_ITALIANE = [
     "AG","AL","AN","AO","AR","AP","AT","AV","BA","BT","BL","BN","BG","BI","BO","BZ","BS","CA","CL","CB","CE","CH","CO","CS","CR","KR","CN","EN","FE","FI","FG","FC","FR","GE","GO","GR","IM","IS","SP","AQ","LT","LE","LC","LI","LO","LU","MC","MN","MS","MT","ME","MI","MO","MB","NA","NO","NU","OR","PD","PA","PR","PV","PG","PU","PE","PC","PI","PT","PN","PZ","PO","RG","RA","RC","RE","RI","RN","RM","RO","SA","SS","SV","SI","SO","SR","TA","TE","TR","TO","TP","TN","TV","TS","UD","VA","VE","VB","VC","VR","VV","VI","VT"
 ]
 REGIONE_TO_PROV = {
     "veneto": {"VR","VI","VE","PD","TV","BL","RO"},
-    "lombardia": {"MI","MB","BG","BS","CO","CR","LC","LO","MN","PV","SO","VA","BZ","BR"},  # BZ non è Lombardia; lo lascio fuori in realtà
+    "lombardia": {"MI","MB","BG","BS","CO","CR","LC","LO","MN","PV","SO","VA"},
     "piemonte": {"AL","AT","BI","CN","NO","TO","VB","VC"},
     "emilia-romagna": {"BO","FE","FC","MO","PR","PC","RA","RE","RN"},
     "toscana": {"AR","FI","GR","LI","LU","MS","PI","PO","PT","SI"},
     "lazio": {"FR","LT","RI","RM","VT"},
 }
-# correzione Lombardia: rimuovo "BZ" e "BR"
-REGIONE_TO_PROV["lombardia"] = {"MI","MB","BG","BS","CO","CR","LC","LO","MN","PV","SO","VA"}
 
 EVALUATION_QUESTIONS = [
     {"key":"q1","text":"1. GENERA FATTURATI IMPORTANTI PER NOI?","category":"Valore Economico"},
@@ -216,6 +215,7 @@ def get_openai_client():
 
 MODEL_NAME = st.secrets.get("MODEL_NAME","gpt-4o-mini")
 TEMPERATURE = float(st.secrets.get("MODEL_TEMPERATURE",0.2))
+ANON_SALT = st.secrets.get("ANON_SALT","nyfil")  # NEW: salt per anonimizzazione
 
 def _truncate(s: str, max_chars: int = 15000) -> str:
     s = str(s)
@@ -236,7 +236,7 @@ def call_llm(system_prompt: str, user_prompt: str) -> str:
     )
     return resp.choices[0].message.content.strip()
 
-# -------- Digest builder per IA (riuso) --------
+# -------- Digest builder per IA --------
 def build_global_digest(df_clienti: pd.DataFrame, df_ordini: pd.DataFrame,
                         anni_sel: list, paese_sel: str, top_n: int = 10) -> str:
     anni_sel = [str(a) for a in anni_sel] if anni_sel else []
@@ -271,61 +271,47 @@ def save_ai_output(cliente: str, anno_rif: str, digest: str, output: str):
     except sqlite3.OperationalError:
         pass
 
+# NEW: carica ultima analisi salvata
+def load_last_ai_output(cliente: str, anno_rif: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT output, created_at FROM ai_insights WHERE cliente=? AND anno_rif=? ORDER BY id DESC LIMIT 1",
+        (cliente, anno_rif)
+    )
+    row = cur.fetchone()
+    if row:
+        return {"output": row[0], "created_at": row[1]}
+    return None
+
+# NEW: anonimizzazione nome cliente per prompt
+def anon_client_id(name: str) -> str:
+    # hash stabile con salt
+    h = hashlib.sha256((ANON_SALT + (name or "")).encode("utf-8")).hexdigest()[:8].upper()
+    return f"CLIENTE_{h}"
+
 # ------------------ PARSER NATURALE (Copilot) ------------------
 def parse_user_query(q: str):
-    """Estrae intent basilari dalla domanda: anni, top_n, metrica, area."""
     qlow = q.lower()
-
-    # anni (4 cifre 20xx)
-    anni = re.findall(r'\b(20\d{2})\b', qlow)
-    anni = list(dict.fromkeys(anni))  # unique, order-preserving
-
-    # top N
+    anni = list(dict.fromkeys(re.findall(r'\b(20\d{2})\b', qlow)))
     top_n = None
     m = re.search(r'\btop\s+(\d+)\b', qlow) or re.search(r'\b(primi|migliori?)\s+(\d+)\b', qlow)
-    if m:
-        top_n = int(m.groups()[-1])
-    elif re.search(r'\b(più|maggior|massimo|max)\b', qlow):
-        top_n = 1
-
-    # metrica
+    if m: top_n = int(m.groups()[-1])
+    elif re.search(r'\b(più|maggior|massimo|max)\b', qlow): top_n = 1
     metric = None
-    if "profittevol" in qlow or "redditizi" in qlow:
-        metric = "euro_kg"
-    elif "€/kg" in qlow or "euro/kg" in qlow or "prezzo medio" in qlow:
-        metric = "euro_kg"
-    elif "fatturato" in qlow:
-        metric = "fatturato"
-    elif re.search(r'\bkg\b|\bquantit', qlow):
-        metric = "kg"
-
-    # area
-    paese = None
-    if "italia" in qlow: paese = "Italia"
-    elif "estero" in qlow: paese = "Estero"
-
+    if "profittevol" in qlow or "€/kg" in qlow or "euro/kg" in qlow or "prezzo medio" in qlow: metric = "euro_kg"
+    elif "fatturato" in qlow: metric = "fatturato"
+    elif re.search(r'\bkg\b|\bquantit', qlow): metric = "kg"
+    paese = "Italia" if "italia" in qlow else ("Estero" if "estero" in qlow else None)
     regione = None
     for reg in REGIONE_TO_PROV.keys():
-        if reg in qlow:
-            regione = reg
-            break
-
-    # entità (clienti/articoli)
+        if reg in qlow: regione = reg; break
     entity = "clienti"
     if "articol" in qlow: entity = "articoli"
     if "color" in qlow: entity = "colori"
-
-    return {
-        "anni": anni,              # list di stringhe
-        "top_n": top_n,            # int o None
-        "metric": metric,          # 'euro_kg' | 'fatturato' | 'kg' | None
-        "paese": paese,            # 'Italia' | 'Estero' | None
-        "regione": regione,        # key del dict REGIONE_TO_PROV o None
-        "entity": entity
-    }
+    return {"anni": anni, "top_n": top_n, "metric": metric, "paese": paese, "regione": regione, "entity": entity}
 
 def apply_region_filter(df_clienti: pd.DataFrame, regione_key: str) -> set:
-    """Ritorna l'insieme di clienti in una certa regione (via PROVINCIA)."""
     if not regione_key or 'PROVINCIA' not in df_clienti.columns:
         return set()
     provs = REGIONE_TO_PROV.get(regione_key, set())
@@ -333,7 +319,6 @@ def apply_region_filter(df_clienti: pd.DataFrame, regione_key: str) -> set:
     return set(df_clienti[df_clienti['PROVINCIA'].str.upper().isin(provs)]['CLIENTE'].unique())
 
 def compute_copilot_answer(df_clienti: pd.DataFrame, df_ordini: pd.DataFrame, intent: dict):
-    """Calcola risposta deterministica in base all'intent estratto."""
     anni = intent.get("anni") or None
     metric = intent.get("metric") or "fatturato"
     entity = intent.get("entity") or "clienti"
@@ -341,65 +326,42 @@ def compute_copilot_answer(df_clienti: pd.DataFrame, df_ordini: pd.DataFrame, in
     paese = intent.get("paese")
     regione = intent.get("regione")
 
-    # Filtri base su TUTTA la base (svincolato da sidebar)
     dfc = df_clienti.copy()
     if anni:
         dfc = dfc[dfc['ANNO'].isin(anni)]
     if paese:
         dfc = dfc[dfc['PAESE']==paese]
-
     clients_region = None
     if regione:
         clients_region = apply_region_filter(dfc, regione)
 
-    # --- CLIENTI ---
     if entity == "clienti":
-        # costruisco aggregati per metriche
-        # fatturato da anagrafica
         fatt = dfc.groupby('CLIENTE', as_index=False)['FATTURATO'].sum()
-
-        # ordini (kg e fatt ordini)
         dfo = df_ordini.copy()
-        if anni:
-            dfo = dfo[dfo['ANNO'].isin(anni)]
-        # restringi a clienti esistenti (coerenza nomi)
-        if not dfc.empty:
-            dfo = dfo[dfo['nome_cliente'].isin(set(dfc['CLIENTE']))]
-
+        if anni: dfo = dfo[dfo['ANNO'].isin(anni)]
+        if not dfc.empty: dfo = dfo[dfo['nome_cliente'].isin(set(dfc['CLIENTE']))]
         kg = dfo.groupby('nome_cliente', as_index=False)['KG'].sum()
         fatt_o = dfo.groupby('nome_cliente', as_index=False)['FATTURATO_ORDINE'].sum()
-
-        # unione
         base = pd.merge(fatt, kg, left_on='CLIENTE', right_on='nome_cliente', how='outer')
         base = pd.merge(base, fatt_o, on='nome_cliente', how='outer')
-        base['CLIENTE'] = base['CLIENTE'].fillna(base['nome_cliente'])
-        base.drop(columns=['nome_cliente'], inplace=True)
+        base['CLIENTE'] = base['CLIENTE'].fillna(base['nome_cliente']); base.drop(columns=['nome_cliente'], inplace=True)
         base[['FATTURATO','KG','FATTURATO_ORDINE']] = base[['FATTURATO','KG','FATTURATO_ORDINE']].fillna(0.0)
-
-        # filtro regione se richiesto
         if clients_region is not None and len(clients_region)>0:
             base = base[base['CLIENTE'].isin(clients_region)]
-
-        # metrica richiesta
         if metric == "fatturato":
-            base['METRICA'] = base['FATTURATO']
-            label_metric = "Fatturato"
+            base['METRICA'] = base['FATTURATO']; label_metric = "Fatturato"
             fmt = base['METRICA'].apply(format_euro_robust)
         elif metric == "kg":
-            base['METRICA'] = base['KG']
-            label_metric = "Kg"
+            base['METRICA'] = base['KG']; label_metric = "Kg"
             fmt = base['METRICA'].map(lambda x: f"{x:,.2f} Kg".replace(",", "."))
-        else:  # euro_kg (profittevole)
+        else:
             base['€/Kg'] = np.where(base['KG']>0, base['FATTURATO_ORDINE']/base['KG'], np.nan)
-            # soglia minima kg per robustezza
             base['METRICA'] = np.where(base['KG']>=20, base['€/Kg'], np.nan)
             base = base.dropna(subset=['METRICA'])
             label_metric = "€/Kg medio (soglia ≥ 20 Kg)"
             fmt = base['METRICA'].map(lambda v: format_euro_robust(v).replace("€ ", "€ "))
-
         if base.empty:
             return {"table": pd.DataFrame(), "explain":"Nessun risultato con i filtri dedotti.", "assumption": intent}
-
         out = base.sort_values('METRICA', ascending=False).head(top_n).copy()
         out_display = pd.DataFrame({
             "CLIENTE": out['CLIENTE'].str.upper(),
@@ -414,50 +376,32 @@ def compute_copilot_answer(df_clienti: pd.DataFrame, df_ordini: pd.DataFrame, in
         if paese: explain.append(f"Paese: **{paese}**")
         if regione: explain.append(f"Regione: **{regione.title()}**")
         if metric=="euro_kg":
-            explain.append("Definizione *profittevole*: €/Kg medio più alto; applicata soglia **≥ 20 Kg** per evitare outlier.")
+            explain.append("Definizione *profittevole*: €/Kg medio più alto; soglia **≥ 20 Kg** per evitare outlier.")
         return {"table": out_display, "explain":" • ".join(explain), "assumption": intent}
 
-    # --- ARTICOLI / COLORI (estendibile) ---
-    # Per ora implemento logica base su articoli per kg/fatturato.
     dfo = df_ordini.copy()
-    if anni:
-        dfo = dfo[dfo['ANNO'].isin(anni)]
-    # Paese/regione: mappo ai clienti appartenenti a quell'area
+    if anni: dfo = dfo[dfo['ANNO'].isin(anni)]
     if paese or regione:
         dfc_area = df_clienti.copy()
         if anni: dfc_area = dfc_area[dfc_area['ANNO'].isin(anni)]
         if paese: dfc_area = dfc_area[dfc_area['PAESE']==paese]
         if regione:
             clients_region = apply_region_filter(dfc_area, regione)
-            if clients_region:
-                dfc_area = dfc_area[dfc_area['CLIENTE'].isin(clients_region)]
+            if clients_region: dfc_area = dfc_area[dfc_area['CLIENTE'].isin(clients_region)]
         allowed_clients = set(dfc_area['CLIENTE'])
         dfo = dfo[dfo['nome_cliente'].isin(allowed_clients)]
-
-    if entity == "articoli":
-        grp_key = "ARTICOLO"
-    else:
-        grp_key = "COLORE"
-
+    grp_key = "ARTICOLO" if intent.get("entity")=="articoli" else "COLORE"
     agg = dfo.groupby(grp_key, as_index=False).agg(KG=('KG','sum'), FATTURATO=('FATTURATO_ORDINE','sum'))
-    if metric == "fatturato":
-        agg['METRICA'] = agg['FATTURATO']
-        label_metric = "Fatturato"
-        fmt = agg['METRICA'].apply(format_euro_robust)
-    elif metric == "euro_kg":
+    if intent.get("metric")=="fatturato":
+        agg['METRICA'] = agg['FATTURATO']; label_metric = "Fatturato"; fmt = agg['METRICA'].apply(format_euro_robust)
+    elif intent.get("metric")=="euro_kg":
         agg['METRICA'] = np.where(agg['KG']>0, agg['FATTURATO']/agg['KG'], np.nan)
-        agg = agg.dropna(subset=['METRICA'])
-        label_metric = "€/Kg medio"
-        fmt = agg['METRICA'].map(lambda v: format_euro_robust(v))
+        agg = agg.dropna(subset=['METRICA']); label_metric = "€/Kg medio"; fmt = agg['METRICA'].map(lambda v: format_euro_robust(v))
     else:
-        agg['METRICA'] = agg['KG']
-        label_metric = "Kg"
-        fmt = agg['METRICA'].map(lambda x: f"{x:,.2f} Kg".replace(",", "."))
-
-    out = agg.sort_values('METRICA', ascending=False).head(top_n).copy()
+        agg['METRICA'] = agg['KG']; label_metric = "Kg"; fmt = agg['METRICA'].map(lambda x: f"{x:,.2f} Kg".replace(",", "."))
+    out = agg.sort_values('METRICA', ascending=False).head(intent.get("top_n") or 3).copy()
     if out.empty:
         return {"table": pd.DataFrame(), "explain":"Nessun risultato con i filtri dedotti.", "assumption": intent}
-
     out_display = pd.DataFrame({
         grp_key.upper(): out[grp_key],
         label_metric: fmt.loc[out.index],
@@ -465,7 +409,7 @@ def compute_copilot_answer(df_clienti: pd.DataFrame, df_ordini: pd.DataFrame, in
         "Fatturato": out['FATTURATO'].apply(format_euro_robust)
     })
     explain = []
-    explain.append(f"Metrica: **{label_metric}** | Entità: **{entity.title()}** | Top {top_n}")
+    explain.append(f"Metrica: **{label_metric}** | Entità: **{intent.get('entity','articoli').title()}** | Top {intent.get('top_n') or 3}")
     explain.append(f"Anni: **{(', '.join(anni)) if anni else 'tutti'}**")
     if paese: explain.append(f"Paese: **{paese}**")
     if regione: explain.append(f"Regione: **{regione.title()}**")
@@ -589,11 +533,21 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                         save_evaluation(cliente, anno_rif, temp); st.cache_data.clear(); st.rerun()
                 evals_data[cliente] = load_evaluation(cliente, anno_rif)
 
+                # NEW: mostra ultima analisi salvata (persistenza)
+                saved = load_last_ai_output(cliente, anno_rif)
+                if saved:
+                    st.markdown("#### Ultima analisi IA salvata")
+                    st.caption(f"Generata il: {saved['created_at']}")
+                    st.markdown(saved['output'])
+                else:
+                    st.info("Nessuna analisi IA salvata per questo cliente/anno.")
+
                 st.markdown("---")
                 if st.button("🔎 Analizza con IA", key=f"ai_analyze_{cliente}_{anno_rif}"):
                     with st.spinner("Sto analizzando i dati con l'IA..."):
-                        # digest sintetico per cliente
-                        def build_client_digest(cliente, anni_sel, anno_rif, dfc, dfo):
+                        # digest sintetico per cliente (ANONIMIZZATO)
+                        def build_client_digest_anon(cliente, anni_sel, anno_rif, dfc, dfo):
+                            alias = anon_client_id(cliente)  # NEW: alias anonimizzato
                             anni_sel = [str(a) for a in anni_sel] if anni_sel else []
                             eval_data = load_evaluation(cliente, anno_rif)
                             tot, val_ec, val_rel = calculate_scores(eval_data)
@@ -603,17 +557,22 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                             kg_tot = float(ord_cli['KG'].sum()); fatt_o = float(ord_cli['FATTURATO_ORDINE'].sum())
                             prezzo = (fatt_o/kg_tot) if kg_tot>0 else 0
                             lines=[]
-                            lines.append(f"Cliente: {cliente.upper()} | Anno valutazione: {anno_rif} | Anni: {', '.join(anni_sel) or 'tutti'}")
+                            # Importante: uso alias, NON il nome reale
+                            lines.append(f"Cliente (anonimo): {alias} | Anno valutazione: {anno_rif} | Anni: {', '.join(anni_sel) or 'tutti'}")
                             lines.append(f"Valutazione → Tot: {tot:.1f} | Econ: {val_ec:.2f} | Rel: {val_rel:.2f}")
-                            lines.append(f"Fatturato per anno: { {r['ANNO']: r['FATTURATO'] for _,r in fatt_cli.iterrows()} }")
+                            lines.append(f"Fatturato per anno (valori €): { {r['ANNO']: float(r['FATTURATO']) for _,r in fatt_cli.iterrows()} }")
                             lines.append(f"Ordini → Kg: {kg_tot:.2f} | Fatt: {fatt_o:.2f} | €/Kg: {prezzo:.3f}")
                             return "\n".join(lines)
-                        digest = build_client_digest(cliente, anni_scheda_selezionati, anno_rif, df_clienti, df_ordini)
+                        digest = build_client_digest_anon(cliente, anni_scheda_selezionati, anno_rif, df_clienti, df_ordini)
                         system = ("Sei un business analyst per un'azienda B2B (nylon). Usa SOLO i dati forniti. "
                                   "Output in italiano, conciso, a punti: 1) Sintesi 2) Opportunità 3) Rischi 4) Azioni 30/60/90 gg.")
-                        user = f"DATI CLIENTE (digest):\n{digest}"
+                        user = f"DATI CLIENTE (digest anonimizzato):\n{digest}"
                         out = call_llm(system, user)
                         st.markdown("#### Risultato IA"); st.markdown(out)
+                        # salvo (salvo digest anonimizzato per sicurezza)
+                        save_ai_output(cliente, anno_rif, digest, out)
+                        # refresh visualizzazione ultima analisi
+                        st.experimental_rerun()
 
         st.divider(); st.subheader("Analisi Strategica Comparata")
         fig_matrix = go.Figure(); fig_radar = go.Figure()
@@ -778,24 +737,20 @@ def page_report_avanzati(df_ordini):
     st.plotly_chart(fig, use_container_width=True)
     if len(df_art)>=2: st.caption("Linea tratteggiata = regressione sui dati storici; rombo = proiezione anno successivo.")
 
-# --- NUOVA PAGINA: COPILOT IA (svincolato dai filtri) ---
+# --- COPILOT IA (pagina dedicata) ---
 def page_copilot(df_clienti: pd.DataFrame, df_ordini: pd.DataFrame, anni_disponibili: list):
     st.title("🤖 Copilot IA — Query Libera su Tutta la Dashboard")
-    st.caption("Il Copilot interpreta la domanda, imposta i filtri necessari (anno, metrica, area) e calcola la risposta sui dati completi, indipendentemente dai filtri globali.")
-    q = st.text_input("Scrivi la tua domanda (es. 'Qual è stato il cliente più profittevole in Veneto nel 2025?')",
-                      key="copilot_free_q")
+    st.caption("Il Copilot imposta i filtri necessari (anno, metrica, area) e calcola la risposta sui dati completi, indipendentemente dai filtri globali.")
+    q = st.text_input("Scrivi la tua domanda (es. 'Qual è stato il cliente più profittevole in Veneto nel 2025?')", key="copilot_free_q")
     colx, coly = st.columns([1,1])
     with colx:
         add_ai_comment = st.checkbox("Aggiungi commento IA (opzionale)", value=False)
     with coly:
         threshold = st.number_input("Soglia minima Kg per 'profittevole' (€/Kg)", value=20.0, min_value=0.0, step=5.0)
-
     if st.button("Esegui"):
         if not q.strip():
             st.warning("Inserisci una domanda."); return
-        # 1) Parsing rapido
         intent = parse_user_query(q)
-        # 2) Calcolo deterministico
         res = compute_copilot_answer(df_clienti, df_ordini, intent)
         st.markdown(f"**Interpretazione automatica:** `{json.dumps(intent, ensure_ascii=False)}`")
         if res["table"].empty:
@@ -803,8 +758,6 @@ def page_copilot(df_clienti: pd.DataFrame, df_ordini: pd.DataFrame, anni_disponi
         else:
             st.markdown(res["explain"])
             st.dataframe(res["table"], use_container_width=True, hide_index=True)
-
-        # 3) (Opzionale) Commento IA sulla risposta
         if add_ai_comment:
             anni_txt = ", ".join(intent.get("anni") or []) or "tutti"
             paese = intent.get("paese") or "Tutti"
