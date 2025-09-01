@@ -164,9 +164,27 @@ def load_all_orders_df() -> pd.DataFrame:
     
     return df_orders[['nome_cliente', 'ANNO', 'ARTICOLO', 'COLORE', 'KG', 'FATTURATO_ORDINE']]
 
+def load_evaluation(cliente: str, anno: str) -> dict:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    question_keys = [q['key'] for q in EVALUATION_QUESTIONS]
+    cursor.execute(f"SELECT {', '.join(question_keys)} FROM evaluation WHERE cliente = ? AND anno = ?", (cliente, anno))
+    row = cursor.fetchone()
+    if row: return dict(zip(question_keys, row))
+    return {key: 3 for key in question_keys}
+
 def save_evaluation(cliente: str, anno: str, data_dict: dict):
-    # (Funzione non modificata)
-    pass 
+    try:
+        conn = get_db_connection()
+        question_keys = [q['key'] for q in EVALUATION_QUESTIONS]
+        columns, placeholders = ", ".join(question_keys), ", ".join(["?"] * len(question_keys))
+        query = f"INSERT OR REPLACE INTO evaluation (cliente, anno, {columns}, updated_at) VALUES (?, ?, {placeholders}, ?)"
+        values = [cliente, anno] + [data_dict.get(key, 1) for key in question_keys] + [datetime.now().isoformat()]
+        with conn:
+            conn.execute(query, tuple(values))
+        st.toast(f"Valutazione per {cliente.upper()} ({anno}) salvata!")
+    except sqlite3.OperationalError as e:
+        st.error(f"Errore di salvataggio: {e}. Sulla versione gratuita di Streamlit Cloud, il database potrebbe essere in sola lettura. Riprova più tardi.")
 
 def calculate_scores(eval_data):
     total_score = sum(eval_data.values())
@@ -236,7 +254,6 @@ def page_elenco_clienti(df_clienti, df_ordini, anni_selezionati, paese_seleziona
             df_ranking['KG_Ordinati'] = df_ranking['KG_Ordinati'].fillna(0)
         else:
             df_ranking['KG_Ordinati'] = 0
-        
         df_ranking = df_ranking.sort_values('Fatturato_Anagrafica', ascending=False)
         df_ranking['CLIENTE_DISPLAY'] = df_ranking['CLIENTE'].str.upper()
 
@@ -271,7 +288,29 @@ def page_elenco_clienti(df_clienti, df_ordini, anni_selezionati, paese_seleziona
             st.dataframe(df_ranking_compare[['CLIENTE', 'PAESE'] + col_order], use_container_width=True, hide_index=True)
 
         with st.expander("Segmentazione Clienti (Basata sull'ultimo anno di valutazione)"):
-            pass
+            if not anni_selezionati:
+                st.info("Seleziona un anno per visualizzare la segmentazione.")
+            else:
+                anno_segmentazione = anni_selezionati[0]
+                all_evals = []
+                clienti_unici_filtrati = df_filtrato['CLIENTE'].unique()
+                for cliente in clienti_unici_filtrati:
+                    eval_data = load_evaluation(cliente, anno_segmentazione)
+                    if sum(eval_data.values()) != len(eval_data) * 3:
+                        _, val_ec, val_rel = calculate_scores(eval_data)
+                        segment = get_matrix_quadrant(val_ec, val_rel)
+                        ha_valutazione = True
+                    else:
+                        segment = 'Valutazione non ancora avvenuta'
+                        ha_valutazione = False
+                    all_evals.append({'CLIENTE': cliente.upper(), 'VALUTAZIONE': segment, 'Ha_Valutazione': ha_valutazione})
+                
+                if all_evals:
+                    df_segments = pd.DataFrame(all_evals)
+                    df_segments.sort_values(by='Ha_Valutazione', ascending=False, inplace=True)
+                    st.dataframe(df_segments[['CLIENTE', 'VALUTAZIONE']], use_container_width=True, hide_index=True)
+                else:
+                    st.warning(f"Nessuna valutazione trovata per l'anno {anno_segmentazione}.")
 
         clienti_options = sorted(df_ranking['CLIENTE'].str.upper().unique())
         clienti_selezionati_upper = st.multiselect( "Seleziona uno o più clienti per l'analisi dettagliata", options=clienti_options, key='client_selector')
