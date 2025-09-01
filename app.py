@@ -440,7 +440,43 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                 st.subheader("Dettaglio per Cliente")
                 for cliente in clienti_selezionati:
                     with st.expander(f"Ordini per {cliente.upper()}"):
-                        pass
+                        ordini_cliente_singolo = ordini_selezionati[ordini_selezionati['nome_cliente'] == cliente]
+                        if ordini_cliente_singolo.empty:
+                            st.write("Nessun dato per questo cliente nel periodo selezionato.")
+                            continue
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("##### Top 5 Articoli per Kg")
+                            agg_articolo_chart = ordini_cliente_singolo.groupby('ARTICOLO').agg(Totale_Kg=('KG', 'sum')).nlargest(5, 'Totale_Kg').reset_index()
+                            fig_pie_art = go.Figure(data=[go.Pie(labels=agg_articolo_chart['ARTICOLO'], values=agg_articolo_chart['Totale_Kg'], hole=.3, textinfo='percent+label')])
+                            st.plotly_chart(fig_pie_art, use_container_width=True)
+                        with col2:
+                            st.markdown("##### Top 5 Colori per Kg")
+                            agg_colore_chart = ordini_cliente_singolo.groupby('COLORE').agg(Totale_Kg=('KG', 'sum')).nlargest(5, 'Totale_Kg').reset_index()
+                            fig_pie_col = go.Figure(data=[go.Pie(labels=agg_colore_chart['COLORE'], values=agg_colore_chart['Totale_Kg'], hole=.3, textinfo='percent+label')])
+                            st.plotly_chart(fig_pie_col, use_container_width=True)
+                        
+                        st.divider()
+
+                        def display_agg_table(df_agg, title, filename_prefix, key_suffix):
+                            st.markdown(f"##### {title}")
+                            column_config = {"Totale_Kg": st.column_config.NumberColumn("Totale Kg", format="%.2f Kg")}
+                            if 'Totale_Fatturato' in df_agg.columns:
+                                column_config["Totale_Fatturato"] = st.column_config.NumberColumn("Totale Fatturato", format="€ %.2f")
+                            st.dataframe(df_agg, use_container_width=True, hide_index=True, column_config=column_config)
+                            csv = df_agg.to_csv(index=False, sep=';', decimal=',', encoding='latin1')
+                            st.download_button(f"📥 Export {title}", csv, f"{filename_prefix}_{cliente}.csv", "text/csv", key=f"btn_{filename_prefix}_{key_suffix}_{'_'.join(anni_scheda_selezionati)}")
+
+                        agg_articolo_full = ordini_cliente_singolo.groupby('ARTICOLO').agg(Totale_Kg=('KG', 'sum'), Totale_Fatturato=('FATTURATO_ORDINE', 'sum')).reset_index().sort_values('Totale_Kg', ascending=False)
+                        display_agg_table(agg_articolo_full, "Dettaglio Analisi per Articolo", "analisi_articolo", cliente)
+
+                        agg_colore_full = ordini_cliente_singolo.groupby('COLORE').agg(Totale_Kg=('KG', 'sum'), Totale_Fatturato=('FATTURATO_ORDINE', 'sum')).reset_index().sort_values('Totale_Kg', ascending=False)
+                        display_agg_table(agg_colore_full, "Dettaglio Analisi per Colore", "analisi_colore", cliente)
+
+                        agg_articolo_colore_full = ordini_cliente_singolo.groupby(['ARTICOLO', 'COLORE']).agg(Totale_Kg=('KG', 'sum'), Totale_Fatturato=('FATTURATO_ORDINE', 'sum')).reset_index().sort_values('Totale_Kg', ascending=False)
+                        display_agg_table(agg_articolo_colore_full, "Dettaglio Analisi per Articolo e Colore", "analisi_articolo_colore", cliente)
+
             else: # Confronta Anni
                 st.info("Modalità Confronto Anni: le tabelle mostrano i dati disaggregati per anno.")
                 for cliente in clienti_selezionati:
