@@ -440,7 +440,6 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                 st.subheader("Dettaglio per Cliente")
                 for cliente in clienti_selezionati:
                     with st.expander(f"Ordini per {cliente.upper()}"):
-                        # (Codice completo qui)
                         pass
             else: # Confronta Anni
                 st.info("Modalità Confronto Anni: le tabelle mostrano i dati disaggregati per anno.")
