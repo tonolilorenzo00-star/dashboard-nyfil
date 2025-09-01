@@ -168,7 +168,19 @@ def save_evaluation(cliente: str, anno: str, data_dict: dict):
     # (Funzione non modificata)
     pass 
 
-# ... (Altre funzioni di utilità non modificate) ...
+def calculate_scores(eval_data):
+    total_score = sum(eval_data.values())
+    val_economico_keys = [q['key'] for q in EVALUATION_QUESTIONS if q['category'] == 'Valore Economico']
+    val_relazionale_keys = [q['key'] for q in EVALUATION_QUESTIONS if q['category'] == 'Valore Relazionale']
+    val_economico = np.mean([eval_data[k] for k in val_economico_keys])
+    val_relazionale = np.mean([eval_data[k] for k in val_relazionale_keys])
+    return total_score, val_economico, val_relazionale
+
+def get_matrix_quadrant(x, y):
+    if x > 3 and y > 3: return "Partner Chiave"
+    if x > 3 and y <= 3: return "Specialista Redditizio"
+    if x <= 3 and y > 3: return "Amico a Basso Impatto"
+    return "Cliente Marginale"
 
 # --- PAGINE DELL'APPLICAZIONE ---
 
@@ -216,49 +228,47 @@ def page_elenco_clienti(df_clienti, df_ordini, anni_selezionati, paese_seleziona
     
     st.subheader("Ranking Clienti")
     if not df_filtrato.empty:
+        df_ranking = df_filtrato.groupby('CLIENTE').agg(Fatturato_Anagrafica=('FATTURATO', 'sum'), PAESE=('PAESE', 'first')).reset_index()
+        if not df_ordini.empty and anni_selezionati:
+            ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
+            df_ordini_agg = ordini_filtrati.groupby('nome_cliente').agg(KG_Ordinati=('KG', 'sum')).reset_index()
+            df_ranking = pd.merge(df_ranking, df_ordini_agg, left_on='CLIENTE', right_on='nome_cliente', how='left')
+            df_ranking['KG_Ordinati'] = df_ranking['KG_Ordinati'].fillna(0)
+        else:
+            df_ranking['KG_Ordinati'] = 0
+        
+        df_ranking = df_ranking.sort_values('Fatturato_Anagrafica', ascending=False)
+        df_ranking['CLIENTE_DISPLAY'] = df_ranking['CLIENTE'].str.upper()
+
         if analysis_mode == "Aggrega Anni":
-            df_ranking = df_filtrato.groupby('CLIENTE').agg(Fatturato_Anagrafica=('FATTURATO', 'sum'), PAESE=('PAESE', 'first')).reset_index()
-            if not df_ordini.empty and anni_selezionati:
-                ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
-                df_ordini_agg = ordini_filtrati.groupby('nome_cliente').agg(KG_Ordinati=('KG', 'sum')).reset_index()
-                df_ranking = pd.merge(df_ranking, df_ordini_agg, left_on='CLIENTE', right_on='nome_cliente', how='left')
-                df_ranking['KG_Ordinati'] = df_ranking['KG_Ordinati'].fillna(0)
-            else:
-                df_ranking['KG_Ordinati'] = 0
-            df_ranking = df_ranking.sort_values('Fatturato_Anagrafica', ascending=False)
-            df_ranking['CLIENTE_DISPLAY'] = df_ranking['CLIENTE'].str.upper()
             df_display = df_ranking[['CLIENTE_DISPLAY', 'PAESE', 'Fatturato_Anagrafica', 'KG_Ordinati']].copy()
             df_display.rename(columns={'CLIENTE_DISPLAY': 'CLIENTE'}, inplace=True)
             df_display['Fatturato_Anagrafica'] = df_display['Fatturato_Anagrafica'].apply(format_euro_robust)
             df_display['KG_Ordinati'] = df_display['KG_Ordinati'].apply(lambda x: f"{x:,.2f} Kg".replace(",", "#").replace(".", ",").replace("#", "."))
             st.dataframe(df_display, use_container_width=True, hide_index=True)
-
-        else: # Modalità "Confronta Anni"
+        else:
             st.info("Modalità Confronto Anni: le tabelle mostrano i dati disaggregati per anno.")
             fatturato_pivot = df_filtrato.pivot_table(index='CLIENTE', columns='ANNO', values='FATTURATO', aggfunc='sum').fillna(0)
-            
             ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
             kg_pivot = ordini_filtrati.pivot_table(index='nome_cliente', columns='ANNO', values='KG', aggfunc='sum').fillna(0)
-            
             df_ranking_compare = pd.merge(fatturato_pivot, kg_pivot, left_index=True, right_index=True, how='outer').fillna(0)
             
-            # Formattazione e ordinamento colonne
-            col_order = ['CLIENTE', 'PAESE']
+            col_order = []
             for year in sorted(anni_selezionati, reverse=True):
-                col_order.append(f"Fatturato_{year}")
-                col_order.append(f"KG_{year}")
-                df_ranking_compare.rename(columns={year+'_x': f"Fatturato_{year}", year+'_y': f"KG_{year}"}, inplace=True)
-                df_ranking_compare[f"Fatturato_{year}"] = df_ranking_compare[f"Fatturato_{year}"].apply(format_euro_robust)
-                df_ranking_compare[f"KG_{year}"] = df_ranking_compare[f"KG_{year}"].apply(lambda x: f"{x:,.2f} Kg")
-
+                col_name_fatt = f"Fatturato_{year}"
+                col_name_kg = f"KG_{year}"
+                df_ranking_compare.rename(columns={year+'_x': col_name_fatt, year+'_y': col_name_kg}, inplace=True)
+                df_ranking_compare[col_name_fatt] = df_ranking_compare[col_name_fatt].apply(format_euro_robust)
+                df_ranking_compare[col_name_kg] = df_ranking_compare[col_name_kg].apply(lambda x: f"{x:,.2f} Kg")
+                col_order.extend([col_name_fatt, col_name_kg])
 
             paese_info = df_filtrato[['CLIENTE', 'PAESE']].drop_duplicates().set_index('CLIENTE')
             df_ranking_compare = df_ranking_compare.merge(paese_info, left_index=True, right_index=True)
             df_ranking_compare.reset_index(inplace=True)
             df_ranking_compare.rename(columns={'index': 'CLIENTE'}, inplace=True)
+            df_ranking_compare['CLIENTE'] = df_ranking_compare['CLIENTE'].str.upper()
             
-            st.dataframe(df_ranking_compare[col_order], use_container_width=True, hide_index=True)
-
+            st.dataframe(df_ranking_compare[['CLIENTE', 'PAESE'] + col_order], use_container_width=True, hide_index=True)
 
         with st.expander("Segmentazione Clienti (Basata sull'ultimo anno di valutazione)"):
             pass
@@ -274,15 +284,195 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
     if 'clienti_selezionati' not in st.session_state or not st.session_state.clienti_selezionati:
         st.info("Seleziona uno o più clienti dalla pagina 'Elenco Clienti' per iniziare l'analisi.")
         return
-    
-    # ... (Codice completo della pagina di analisi dettagliata)
-    pass
 
+    clienti_selezionati = st.session_state.clienti_selezionati
+    clienti_selezionati_upper = [c.upper() for c in clienti_selezionati]
+    
+    anni_scheda_selezionati = st.multiselect(
+        "Seleziona anni per l'analisi di dettaglio", 
+        options=anni_disponibili, 
+        default=anni_selezionati_globali,
+        key="anni_dettaglio_selector"
+    )
+    
+    st.header(f"Scheda Alleati: {', '.join(clienti_selezionati_upper)}")
+    
+    anno_riferimento_scheda = anni_scheda_selezionati[0] if anni_scheda_selezionati else anni_disponibili[0]
+    
+    tab_eval, tab_dati, tab_ordini = st.tabs(["Valutazione Alleati", "Anagrafica & Fatturato", "Ordini & Statistiche"])
+    
+    with tab_eval:
+        st.subheader(f"Valutazioni Individuali (Anno di riferimento: {anno_riferimento_scheda})")
+        evals_data = {}
+        for cliente in clienti_selezionati:
+            with st.expander(f"Valutazione per {cliente.upper()}"):
+                with st.form(key=f"evaluation_form_{cliente}_{anno_riferimento_scheda}"):
+                    eval_data = load_evaluation(cliente, anno_riferimento_scheda)
+                    cols = st.columns(3)
+                    temp_eval_data = {}
+                    for i, q in enumerate(EVALUATION_QUESTIONS):
+                        with cols[i % 3]:
+                            temp_eval_data[q['key']] = st.slider(
+                                q['text'], 1, 5, value=eval_data.get(q['key'], 3), key=f"{q['key']}_{cliente}_{anno_riferimento_scheda}"
+                            )
+                    submitted = st.form_submit_button("Salva Valutazione")
+                    if submitted:
+                        save_evaluation(cliente, anno_riferimento_scheda, temp_eval_data)
+                        st.cache_data.clear()
+                        st.rerun()
+                evals_data[cliente] = load_evaluation(cliente, anno_riferimento_scheda)
+
+        st.divider()
+        st.subheader("Analisi Strategica Comparata")
+        fig_matrix = go.Figure()
+        fig_radar = go.Figure()
+        for cliente, data in evals_data.items():
+            total_score, val_economico, val_relazionale = calculate_scores(data)
+            fig_matrix.add_trace(go.Scatter(x=[val_economico], y=[val_relazionale], mode='markers+text', text=cliente.upper(), marker=dict(size=15), name=cliente.upper()))
+            radar_values = [data[q['key']] for q in EVALUATION_QUESTIONS]
+            fig_radar.add_trace(go.Scatterpolar(r=radar_values + [radar_values[0]], theta=[f"Q{i+1}" for i in range(15)] + ["Q1"], fill='toself', name=cliente.upper(), opacity=0.7))
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("##### Matrice Decisionale")
+            st.plotly_chart(fig_matrix, use_container_width=True)
+        with col2:
+            st.markdown("##### Profili Radar")
+            st.plotly_chart(fig_radar, use_container_width=True)
+
+    with tab_dati:
+        for cliente in clienti_selezionati:
+            with st.expander(f"Dati per {cliente.upper()}"):
+                dati_cliente = df_clienti[df_clienti['CLIENTE'] == cliente]
+                st.subheader(f"Anagrafica (Riferimento anno: {anno_riferimento_scheda})")
+                
+                anagrafica_anno_scheda = dati_cliente[dati_cliente['ANNO'] == anno_riferimento_scheda]
+                if not anagrafica_anno_scheda.empty:
+                    anagrafica = anagrafica_anno_scheda.iloc[0]
+                elif not dati_cliente.empty:
+                    anagrafica = dati_cliente.sort_values('ANNO', ascending=False).iloc[0]
+                    st.info(f"Dati anagrafici per l'anno {anno_riferimento_scheda} non trovati. Mostro i più recenti.")
+                else:
+                    st.warning("Dati anagrafici non disponibili.")
+                    continue
+
+                cols_anagrafica = st.columns(3)
+                cols_anagrafica[0].markdown(f"**Indirizzo:**<br>{anagrafica.get('VIA', 'N/D')}", unsafe_allow_html=True)
+                cols_anagrafica[1].markdown(f"**Paese:**<br>{anagrafica.get('PAESE', 'N/D')}", unsafe_allow_html=True)
+                cols_anagrafica[2].markdown(f"**Contatti:**<br>Titolare: {anagrafica.get('TITOLARE', 'N/D')}", unsafe_allow_html=True)
+                st.divider()
+                st.subheader("Andamento Fatturato Annuale (da Anagrafica)")
+                fatturato_annuale = dati_cliente.groupby('ANNO')['FATTURATO'].sum().sort_index()
+                fig_bar = go.Figure(data=[go.Bar(x=fatturato_annuale.index, y=fatturato_annuale.values, text=[format_euro_robust(v) for v in fatturato_annuale.values], textposition='auto')])
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+    with tab_ordini:
+        st.subheader(f"Statistiche Ordini (Anni selezionati: {', '.join(anni_scheda_selezionati)})")
+        if df_ordini.empty or not anni_scheda_selezionati:
+            st.info("Seleziona uno o più anni nel selettore qui sopra per visualizzare le statistiche degli ordini.")
+        else:
+            ordini_selezionati = df_ordini[(df_ordini['ANNO'].isin(anni_scheda_selezionati)) & (df_ordini['nome_cliente'].isin(clienti_selezionati))]
+            if ordini_selezionati.empty:
+                st.info("Nessun ordine trovato per i clienti e gli anni selezionati.")
+            else:
+                st.subheader("Statistiche Aggregate (Clienti Selezionati)")
+                total_kg, total_fatturato_ordini = ordini_selezionati['KG'].sum(), ordini_selezionati['FATTURATO_ORDINE'].sum()
+                prezzo_medio_kg = (total_fatturato_ordini / total_kg) if total_kg > 0 else 0
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                kpi1.metric("Kg Totali (Aggregati)", f"{total_kg:,.2f} Kg".replace(",", "."))
+                kpi2.metric("Fatturato Ordini (Aggregato)", format_euro_robust(total_fatturato_ordini))
+                kpi3.metric("Prezzo Medio Kg (Aggregato)", f"{format_euro_robust(prezzo_medio_kg)} /Kg")
+                kpi4.metric("N. Righe Ordine (Aggregate)", f"{len(ordini_selezionati)}")
+                st.divider()
+
+                st.subheader("Dettaglio per Cliente")
+                for cliente in clienti_selezionati:
+                    with st.expander(f"Ordini per {cliente.upper()}"):
+                        ordini_cliente_singolo = ordini_selezionati[ordini_selezionati['nome_cliente'] == cliente]
+                        if ordini_cliente_singolo.empty:
+                            st.write("Nessun ordine per questo cliente nel periodo selezionato.")
+                            continue
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("##### Top 5 Articoli per Kg")
+                            agg_articolo_chart = ordini_cliente_singolo.groupby('ARTICOLO').agg(Totale_Kg=('KG', 'sum')).nlargest(5, 'Totale_Kg').reset_index()
+                            fig_pie_art = go.Figure(data=[go.Pie(labels=agg_articolo_chart['ARTICOLO'], values=agg_articolo_chart['Totale_Kg'], hole=.3, textinfo='percent+label')])
+                            st.plotly_chart(fig_pie_art, use_container_width=True)
+                        with col2:
+                            st.markdown("##### Top 5 Colori per Kg")
+                            agg_colore_chart = ordini_cliente_singolo.groupby('COLORE').agg(Totale_Kg=('KG', 'sum')).nlargest(5, 'Totale_Kg').reset_index()
+                            fig_pie_col = go.Figure(data=[go.Pie(labels=agg_colore_chart['COLORE'], values=agg_colore_chart['Totale_Kg'], hole=.3, textinfo='percent+label')])
+                            st.plotly_chart(fig_pie_col, use_container_width=True)
+                        
+                        st.divider()
+
+                        def display_agg_table(df_agg, title, filename_prefix, key_suffix):
+                            st.markdown(f"##### {title}")
+                            column_config = {"Totale_Kg": st.column_config.NumberColumn("Totale Kg", format="%.2f Kg")}
+                            if 'Totale_Fatturato' in df_agg.columns:
+                                column_config["Totale_Fatturato"] = st.column_config.NumberColumn("Totale Fatturato", format="€ %.2f")
+                            st.dataframe(df_agg, use_container_width=True, hide_index=True, column_config=column_config)
+                            csv = df_agg.to_csv(index=False, sep=';', decimal=',', encoding='latin1')
+                            st.download_button(f"📥 Export {title}", csv, f"{filename_prefix}_{cliente}.csv", "text/csv", key=f"btn_{filename_prefix}_{key_suffix}_{'_'.join(anni_scheda_selezionati)}")
+
+                        agg_articolo_full = ordini_cliente_singolo.groupby('ARTICOLO').agg(Totale_Kg=('KG', 'sum'), Totale_Fatturato=('FATTURATO_ORDINE', 'sum')).reset_index().sort_values('Totale_Kg', ascending=False)
+                        display_agg_table(agg_articolo_full, "Dettaglio Analisi per Articolo", "analisi_articolo", cliente)
+
+                        agg_colore_full = ordini_cliente_singolo.groupby('COLORE').agg(Totale_Kg=('KG', 'sum'), Totale_Fatturato=('FATTURATO_ORDINE', 'sum')).reset_index().sort_values('Totale_Kg', ascending=False)
+                        display_agg_table(agg_colore_full, "Dettaglio Analisi per Colore", "analisi_colore", cliente)
+
+                        agg_articolo_colore_full = ordini_cliente_singolo.groupby(['ARTICOLO', 'COLORE']).agg(Totale_Kg=('KG', 'sum'), Totale_Fatturato=('FATTURATO_ORDINE', 'sum')).reset_index().sort_values('Totale_Kg', ascending=False)
+                        display_agg_table(agg_articolo_colore_full, "Dettaglio Analisi per Articolo e Colore", "analisi_articolo_colore", cliente)
 
 def page_stato_dati(df_clienti, df_ordini):
     st.title("Stato dei Dati e Diagnostica")
-    # ... (Codice non modificato)
-    pass
+    
+    st.header("1. Controllo File")
+    st.write("Questi sono i file che l'applicazione ha trovato nella cartella `data/`:")
+    files_trovati = [p.name for p in DATA_DIR.glob('*')]
+    if files_trovati:
+        st.dataframe(files_trovati, use_container_width=True)
+    else:
+        st.error("Nessun file trovato nella cartella 'data'. Assicurati di aver caricato i file su GitHub.")
+
+    st.header("2. Analisi del Caricamento")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Anagrafica Clienti (`elenco clienti.csv`)")
+        if not df_clienti.empty:
+            st.metric("Righe totali caricate (dopo espansione anni)", len(df_clienti))
+            st.metric("Clienti unici trovati", df_clienti['CLIENTE'].nunique())
+        else:
+            st.warning("Il file dell'anagrafica clienti non è stato caricato o è vuoto.")
+
+    with col2:
+        st.subheader("File Ordini (`ordini_*.csv`)")
+        if not df_ordini.empty:
+            st.metric("Righe totali caricate", len(df_ordini))
+            st.metric("Clienti unici trovati", df_ordini['nome_cliente'].nunique())
+        else:
+            st.warning("Nessun file degli ordini caricato o sono tutti vuoti.")
+            
+    st.header("3. Diagnosi delle Corrispondenze")
+    if not df_clienti.empty and not df_ordini.empty:
+        clienti_anagrafica = set(df_clienti['CLIENTE'].unique())
+        clienti_ordini = set(df_ordini['nome_cliente'].unique())
+        
+        clienti_corrispondenti = clienti_anagrafica.intersection(clienti_ordini)
+        clienti_orfani = clienti_ordini - clienti_anagrafica
+
+        st.metric("Numero di clienti che corrispondono tra Anagrafica e Ordini", len(clienti_corrispondenti))
+        
+        if clienti_orfani:
+            st.error(f"Trovati {len(clienti_orfani)} clienti 'orfani'!")
+            st.write("Questi clienti sono presenti nei file degli ordini, ma **NON** nel file `elenco clienti.csv` (o i nomi non corrispondono esattamente). Questo è il motivo per cui il loro fatturato non viene visualizzato.")
+            st.write("**Azione richiesta:** Correggi i nomi di questi clienti nel file `elenco clienti.csv` per farli corrispondere esattamente a come appaiono qui sotto, poi ricarica il file su GitHub.")
+            st.dataframe(sorted([c.upper() for c in clienti_orfani]), use_container_width=True)
+        else:
+            st.success("Ottimo! Tutti i clienti presenti negli ordini hanno una corrispondenza nel file anagrafico.")
+    else:
+        st.info("Carica sia il file anagrafica che i file ordini per eseguire la diagnosi.")
 
 # --- LOGICA PRINCIPALE E NAVIGAZIONE ---
 init_db()
