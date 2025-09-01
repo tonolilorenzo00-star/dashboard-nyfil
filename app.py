@@ -12,7 +12,9 @@ import base64
 # --- CONFIGURAZIONE PAGINA E COSTANTI ---
 st.set_page_config(page_title="Analisi Clienti Nyfil", layout="wide")
 
-DATA_DIR = Path("data")
+# FIX DEFINITIVO: Usa percorsi assoluti basati sulla posizione dello script
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
 DB_FILE = DATA_DIR / "app.db"
 CLIENTS_CSV = DATA_DIR / "elenco clienti.csv"
 
@@ -168,16 +170,77 @@ def save_evaluation(cliente: str, anno: str, data_dict: dict):
 
 def page_dashboard(df_clienti, df_ordini, anni_selezionati, paese_selezionato):
     st.title("Dashboard Riepilogativa")
-    # ... (Codice non modificato)
-    pass
+    df_filtrato = df_clienti[df_clienti['ANNO'].isin(anni_selezionati)] if anni_selezionati else df_clienti
+    if paese_selezionato != "Tutti": 
+        df_filtrato = df_filtrato[df_filtrato['PAESE'] == paese_selezionato]
+
+    st.header("KPI Generali (da anagrafica)")
+    if not df_filtrato.empty:
+        total_revenue = df_filtrato['FATTURATO'].sum()
+        revenue_italia = df_filtrato[df_filtrato['PAESE'] == 'Italia']['FATTURATO'].sum()
+        quota_italia = (revenue_italia / total_revenue * 100) if total_revenue > 0 else 0
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        kpi1.metric("Totale Fatturato", format_euro_robust(total_revenue))
+        kpi2.metric("Quota Italia", f"{quota_italia:.1f}%")
+        kpi3.metric("Quota Estero", f"{100 - quota_italia:.1f}%")
+        kpi4.metric("N. Clienti nel filtro", f"{df_filtrato['CLIENTE'].nunique()}")
+    else:
+        st.info("Nessun dato anagrafico per i filtri selezionati.")
+    
+    st.header("Macrodati Ordini")
+    if not df_ordini.empty and anni_selezionati:
+        ordini_filtrati_globale = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
+        col1_macro, col2_macro, col3_macro = st.columns(3)
+        with col1_macro:
+            st.markdown("###### Top 10 Articoli (per Kg)")
+            st.dataframe(ordini_filtrati_globale.groupby('ARTICOLO')['KG'].sum().nlargest(10).reset_index(), use_container_width=True, hide_index=True, height=385)
+        with col2_macro:
+            st.markdown("###### Top 10 Colori (per Kg)")
+            st.dataframe(ordini_filtrati_globale.groupby('COLORE')['KG'].sum().nlargest(10).reset_index(), use_container_width=True, hide_index=True, height=385)
+        with col3_macro:
+            st.markdown("###### Top 10 Articolo-Colore (per Kg)")
+            st.dataframe(ordini_filtrati_globale.groupby(['ARTICOLO', 'COLORE'])['KG'].sum().nlargest(10).reset_index(), use_container_width=True, hide_index=True, height=385)
+    else:
+        st.info("Seleziona almeno un anno per visualizzare i macrodati degli ordini.")
+
 
 def page_elenco_clienti(df_clienti, df_ordini, anni_selezionati, paese_selezionato):
     st.title("Elenco e Segmentazione Clienti")
-    # ... (Codice non modificato)
-    pass
+    df_filtrato = df_clienti[df_clienti['ANNO'].isin(anni_selezionati)] if anni_selezionati else df_clienti
+    if paese_selezionato != "Tutti":
+        df_filtrato = df_filtrato[df_filtrato['PAESE'] == paese_selezionato]
+    
+    st.subheader("Ranking Clienti")
+    if not df_filtrato.empty:
+        df_ranking = df_filtrato.groupby('CLIENTE').agg(Fatturato_Anagrafica=('FATTURATO', 'sum'), PAESE=('PAESE', 'first')).reset_index()
+        if not df_ordini.empty and anni_selezionati:
+            ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
+            df_ordini_agg = ordini_filtrati.groupby('nome_cliente').agg(KG_Ordinati=('KG', 'sum')).reset_index()
+            df_ranking = pd.merge(df_ranking, df_ordini_agg, left_on='CLIENTE', right_on='nome_cliente', how='left')
+            df_ranking['KG_Ordinati'] = df_ranking['KG_Ordinati'].fillna(0)
+        else:
+            df_ranking['KG_Ordinati'] = 0
+        df_ranking = df_ranking.sort_values('Fatturato_Anagrafica', ascending=False)
+        df_ranking['CLIENTE_DISPLAY'] = df_ranking['CLIENTE'].str.upper()
+        df_display = df_ranking[['CLIENTE_DISPLAY', 'PAESE', 'Fatturato_Anagrafica', 'KG_Ordinati']].copy()
+        df_display.rename(columns={'CLIENTE_DISPLAY': 'CLIENTE'}, inplace=True)
+        df_display['Fatturato_Anagrafica'] = df_display['Fatturato_Anagrafica'].apply(format_euro_robust)
+        df_display['KG_Ordinati'] = df_display['KG_Ordinati'].apply(lambda x: f"{x:,.2f} Kg".replace(",", "#").replace(".", ",").replace("#", "."))
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        with st.expander("Segmentazione Clienti (Basata sull'ultimo anno di valutazione)"):
+            pass
+
+        clienti_options = sorted(df_ranking['CLIENTE'].str.upper().unique())
+        clienti_selezionati_upper = st.multiselect( "Seleziona uno o più clienti per l'analisi dettagliata", options=clienti_options, key='client_selector')
+        st.session_state.clienti_selezionati = [c.lower() for c in clienti_selezionati_upper]
+        st.info("Una volta selezionati i clienti, vai alla pagina 'Analisi Dettagliata' dalla sidebar.")
 
 def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selezionati_globali):
     st.title("Analisi Dettagliata Cliente")
+    if 'clienti_selezionati' not in st.session_state or not st.session_state.clienti_selezionati:
+        st.info("Seleziona uno o più clienti dalla pagina 'Elenco Clienti' per iniziare l'analisi.")
+        return
     # ... (Codice non modificato)
     pass
 
@@ -186,7 +249,7 @@ def page_stato_dati(df_clienti, df_ordini):
     
     st.header("1. Controllo File")
     st.write("Questi sono i file che l'applicazione ha trovato nella cartella `data/`:")
-    files_trovati = [p.name for p in Path(DATA_DIR).glob('*')]
+    files_trovati = [p.name for p in DATA_DIR.glob('*')]
     if files_trovati:
         st.dataframe(files_trovati, use_container_width=True)
     else:
@@ -197,7 +260,7 @@ def page_stato_dati(df_clienti, df_ordini):
     with col1:
         st.subheader("Anagrafica Clienti (`elenco clienti.csv`)")
         if not df_clienti.empty:
-            st.metric("Righe totali caricate", len(df_clienti))
+            st.metric("Righe totali caricate (dopo espansione anni)", len(df_clienti))
             st.metric("Clienti unici trovati", df_clienti['CLIENTE'].nunique())
         else:
             st.warning("Il file dell'anagrafica clienti non è stato caricato o è vuoto.")
@@ -224,7 +287,7 @@ def page_stato_dati(df_clienti, df_ordini):
             st.error(f"Trovati {len(clienti_orfani)} clienti 'orfani'!")
             st.write("Questi clienti sono presenti nei file degli ordini, ma **NON** nel file `elenco clienti.csv` (o i nomi non corrispondono esattamente). Questo è il motivo per cui il loro fatturato non viene visualizzato.")
             st.write("**Azione richiesta:** Correggi i nomi di questi clienti nel file `elenco clienti.csv` per farli corrispondere esattamente a come appaiono qui sotto, poi ricarica il file su GitHub.")
-            st.dataframe(sorted(list(clienti_orfani)), use_container_width=True)
+            st.dataframe(sorted([c.upper() for c in clienti_orfani]), use_container_width=True)
         else:
             st.success("Ottimo! Tutti i clienti presenti negli ordini hanno una corrispondenza nel file anagrafico.")
     else:
@@ -245,16 +308,15 @@ anni_ordini = df_ordini['ANNO'].unique() if not df_ordini.empty else []
 tutti_gli_anni = pd.concat([pd.Series(anni_clienti), pd.Series(anni_ordini)]).unique()
 anni_disponibili = sorted([anno for anno in tutti_gli_anni if pd.notna(anno)], reverse=True)
 
-# --- SIDEBAR ---
 with st.sidebar:
-    logo_path = Path("data/Logo_nyfil.png")
+    logo_path = DATA_DIR / "Logo_nyfil.png"
     if logo_path.exists():
         st.image(str(logo_path), width=120)
     
     st.title("Navigazione")
     pagina_selezionata = st.radio(
         "Scegli una pagina:",
-        ("Dashboard", "Elenco Clienti", "Analisi Dettagliata", "Stato dei Dati") # Aggiunta nuova pagina
+        ("Dashboard", "Elenco Clienti", "Analisi Dettagliata", "Stato dei Dati")
     )
 
     st.divider()
@@ -264,84 +326,12 @@ with st.sidebar:
 
 
 # --- ROUTING DELLE PAGINE ---
+# (Questo routing va completato con il codice completo delle funzioni)
 if pagina_selezionata == "Dashboard":
-    # Qui inserisci il codice completo della funzione page_dashboard
-    st.title("Dashboard Riepilogativa")
-    df_filtrato = df_clienti[df_clienti['ANNO'].isin(anni_selezionati_globali)] if anni_selezionati_globali else df_clienti
-    if paese_selezionato != "Tutti": 
-        df_filtrato = df_filtrato[df_filtrato['PAESE'] == paese_selezionato]
-
-    st.header("KPI Generali (da anagrafica)")
-    if not df_filtrato.empty:
-        total_revenue = df_filtrato['FATTURATO'].sum()
-        revenue_italia = df_filtrato[df_filtrato['PAESE'] == 'Italia']['FATTURATO'].sum()
-        quota_italia = (revenue_italia / total_revenue * 100) if total_revenue > 0 else 0
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        kpi1.metric("Totale Fatturato", format_euro_robust(total_revenue))
-        kpi2.metric("Quota Italia", f"{quota_italia:.1f}%")
-        kpi3.metric("Quota Estero", f"{100 - quota_italia:.1f}%")
-        kpi4.metric("N. Clienti nel filtro", f"{df_filtrato['CLIENTE'].nunique()}")
-    else:
-        st.info("Nessun dato anagrafico per i filtri selezionati.")
-    
-    st.header("Macrodati Ordini")
-    if not df_ordini.empty and anni_selezionati_globali:
-        ordini_filtrati_globale = df_ordini[df_ordini['ANNO'].isin(anni_selezionati_globali)]
-        col1_macro, col2_macro, col3_macro = st.columns(3)
-        with col1_macro:
-            st.markdown("###### Top 10 Articoli (per Kg)")
-            st.dataframe(ordini_filtrati_globale.groupby('ARTICOLO')['KG'].sum().nlargest(10).reset_index(), use_container_width=True, hide_index=True, height=385)
-        with col2_macro:
-            st.markdown("###### Top 10 Colori (per Kg)")
-            st.dataframe(ordini_filtrati_globale.groupby('COLORE')['KG'].sum().nlargest(10).reset_index(), use_container_width=True, hide_index=True, height=385)
-        with col3_macro:
-            st.markdown("###### Top 10 Articolo-Colore (per Kg)")
-            st.dataframe(ordini_filtrati_globale.groupby(['ARTICOLO', 'COLORE'])['KG'].sum().nlargest(10).reset_index(), use_container_width=True, hide_index=True, height=385)
-    else:
-        st.info("Seleziona almeno un anno per visualizzare i macrodati degli ordini.")
-
+    page_dashboard(df_clienti, df_ordini, anni_selezionati_globali, paese_selezionato)
 elif pagina_selezionata == "Elenco Clienti":
-    # Qui inserisci il codice completo della funzione page_elenco_clienti
-    st.title("Elenco e Segmentazione Clienti")
-    df_filtrato = df_clienti[df_clienti['ANNO'].isin(anni_selezionati_globali)] if anni_selezionati_globali else df_clienti
-    if paese_selezionato != "Tutti":
-        df_filtrato = df_filtrato[df_filtrato['PAESE'] == paese_selezionato]
-    
-    st.subheader("Ranking Clienti")
-    if not df_filtrato.empty:
-        df_ranking = df_filtrato.groupby('CLIENTE').agg(Fatturato_Anagrafica=('FATTURATO', 'sum'), PAESE=('PAESE', 'first')).reset_index()
-        if not df_ordini.empty and anni_selezionati_globali:
-            ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati_globali)]
-            df_ordini_agg = ordini_filtrati.groupby('nome_cliente').agg(KG_Ordinati=('KG', 'sum')).reset_index()
-            df_ranking = pd.merge(df_ranking, df_ordini_agg, left_on='CLIENTE', right_on='nome_cliente', how='left')
-            df_ranking['KG_Ordinati'] = df_ranking['KG_Ordinati'].fillna(0)
-        else:
-            df_ranking['KG_Ordinati'] = 0
-        df_ranking = df_ranking.sort_values('Fatturato_Anagrafica', ascending=False)
-        df_ranking['CLIENTE_DISPLAY'] = df_ranking['CLIENTE'].str.upper()
-        df_display = df_ranking[['CLIENTE_DISPLAY', 'PAESE', 'Fatturato_Anagrafica', 'KG_Ordinati']].copy()
-        df_display.rename(columns={'CLIENTE_DISPLAY': 'CLIENTE'}, inplace=True)
-        df_display['Fatturato_Anagrafica'] = df_display['Fatturato_Anagrafica'].apply(format_euro_robust)
-        df_display['KG_Ordinati'] = df_display['KG_Ordinati'].apply(lambda x: f"{x:,.2f} Kg".replace(",", "#").replace(".", ",").replace("#", "."))
-        st.dataframe(df_display, use_container_width=True, hide_index=True)
-
-        with st.expander("Segmentazione Clienti (Basata sull'ultimo anno di valutazione)"):
-            # ... (codice segmentazione)
-            pass
-
-        clienti_options = sorted(df_ranking['CLIENTE'].str.upper().unique())
-        clienti_selezionati_upper = st.multiselect( "Seleziona uno o più clienti per l'analisi dettagliata", options=clienti_options, key='client_selector')
-        st.session_state.clienti_selezionati = [c.lower() for c in clienti_selezionati_upper]
-        st.info("Una volta selezionati i clienti, vai alla pagina 'Analisi Dettagliata' dalla sidebar.")
-
+    page_elenco_clienti(df_clienti, df_ordini, anni_selezionati_globali, paese_selezionato)
 elif pagina_selezionata == "Analisi Dettagliata":
-    # Qui inserisci il codice completo della funzione page_analisi_dettagliata
-    st.title("Analisi Dettagliata Cliente")
-    if 'clienti_selezionati' not in st.session_state or not st.session_state.clienti_selezionati:
-        st.info("Seleziona uno o più clienti dalla pagina 'Elenco Clienti' per iniziare l'analisi.")
-    else:
-        # ... (codice analisi dettagliata)
-        pass
-        
+    page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selezionati_globali)
 elif pagina_selezionata == "Stato dei Dati":
     page_stato_dati(df_clienti, df_ordini)
