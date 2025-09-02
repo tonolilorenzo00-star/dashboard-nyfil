@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -12,10 +13,8 @@ import hashlib
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 from openai import OpenAI
 
-# --- CONFIGURAZIONE PAGINA E COSTANTI ---
+# -------------------- CONFIG --------------------
 st.set_page_config(page_title="Analisi Clienti Nyfil", layout="wide")
-
-# Percorsi
 try:
     BASE_DIR = Path(__file__).parent
 except NameError:
@@ -25,7 +24,6 @@ DB_FILE = DATA_DIR / "app.db"
 CLIENTS_CSV = DATA_DIR / "elenco clienti.csv"
 DATA_DIR.mkdir(exist_ok=True)
 
-# Province e regioni
 PROVINCE_ITALIANE = [
     "AG","AL","AN","AO","AR","AP","AT","AV","BA","BT","BL","BN","BG","BI","BO","BZ","BS","CA","CL","CB","CE","CH","CO","CS","CR","KR","CN","EN","FE","FI","FG","FC","FR","GE","GO","GR","IM","IS","SP","AQ","LT","LE","LC","LI","LO","LU","MC","MN","MS","MT","ME","MI","MO","MB","NA","NO","NU","OR","PD","PA","PR","PV","PG","PU","PE","PC","PI","PT","PN","PZ","PO","RG","RA","RC","RE","RI","RN","RM","RO","SA","SS","SV","SI","SO","SR","TA","TE","TR","TO","TP","TN","TV","TS","UD","VA","VE","VB","VC","VR","VV","VI","VT"
 ]
@@ -56,12 +54,11 @@ EVALUATION_QUESTIONS = [
     {"key":"q15","text":"15. E' UN PARTNER CON IL QUALE POTER CONDIVIDERE LA NOSTRA STRATEGIA?","category":"Potenziale Futuro"},
 ]
 
-# ------------------ UTILS DATI ------------------
-def format_euro_robust(value):
+# -------------------- UTILS --------------------
+def format_euro_robust(v):
     try:
-        if pd.isna(value) or not isinstance(value,(int,float)):
-            return "N/A"
-        return f"€ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        if pd.isna(v) or not isinstance(v,(int,float)): return "N/A"
+        return f"€ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
     except Exception:
         return "N/A"
 
@@ -91,6 +88,7 @@ def detect_country(cap: str, provincia: str) -> str:
 def get_db_connection():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
+# -------------------- DB INIT (PATCH ROBUSTA) --------------------
 def init_db():
     conn = get_db_connection()
     with conn:
@@ -111,20 +109,47 @@ def init_db():
                 created_at TEXT
             );
         """)
-        # NEW: tabella per stelle, priorità, note e stato azione
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS client_actions (
-                cliente TEXT NOT NULL,
-                anno_rif TEXT NOT NULL,
-                stars INTEGER DEFAULT 0,
-                priority REAL DEFAULT 0,
-                note TEXT,
-                done INTEGER DEFAULT 0,
-                updated_at TEXT,
-                PRIMARY KEY (cliente, anno_rif)
-            );
-        """)
 
+        # --- Creazione/migrazione sicura di client_actions ---
+        row = conn.execute(
+            "SELECT type, name FROM sqlite_master WHERE name = ?", ("client_actions",)
+        ).fetchone()
+        if row and row[0] != "table":
+            # rinomina oggetto non-tabella con lo stesso nome
+            conn.execute(
+                f"ALTER {row[0].upper()} client_actions RENAME TO client_actions_legacy_{int(datetime.now().timestamp())}"
+            )
+        # ora verifica se la tabella esiste
+        row2 = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='client_actions'"
+        ).fetchone()
+        if not row2:
+            conn.execute("""
+                CREATE TABLE client_actions (
+                    cliente TEXT NOT NULL,
+                    anno_rif TEXT NOT NULL,
+                    stars INTEGER DEFAULT 0,
+                    priority REAL DEFAULT 0,
+                    note TEXT,
+                    done INTEGER DEFAULT 0,
+                    updated_at TEXT,
+                    PRIMARY KEY (cliente, anno_rif)
+                );
+            """)
+        else:
+            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(client_actions)").fetchall()}
+            needed = [
+                ("stars","INTEGER","0"),
+                ("priority","REAL","0"),
+                ("note","TEXT","''"),
+                ("done","INTEGER","0"),
+                ("updated_at","TEXT","NULL"),
+            ]
+            for col, ctype, default in needed:
+                if col not in existing_cols:
+                    conn.execute(f"ALTER TABLE client_actions ADD COLUMN {col} {ctype} DEFAULT {default};")
+
+# -------------------- LOAD DATA --------------------
 @st.cache_data
 def load_clients_df(uploaded_file=None) -> pd.DataFrame:
     source = CLIENTS_CSV if CLIENTS_CSV.exists() else uploaded_file
@@ -132,12 +157,12 @@ def load_clients_df(uploaded_file=None) -> pd.DataFrame:
     try:
         df = pd.read_csv(source, sep=';', encoding='latin1', low_memory=False)
         df.columns = [c.strip().lower() for c in df.columns]
-        required_cols = {
-            "nome_clietne":"CLIENTE","nome_cliente":"CLIENTE","via":"VIA","città":"CITTA",
-            "cap":"CAP","provincia":"PROVINCIA","titolare_azienda":"TITOLARE",
-            "recapiti_mail":"EMAIL","anno":"ANNO_ORIG","imponibile":"IMPONIBILE"
+        required = {
+            "nome_clietne":"CLIENTE","nome_cliente":"CLIENTE","via":"VIA","città":"CITTA","cap":"CAP",
+            "provincia":"PROVINCIA","titolare_azienda":"TITOLARE","recapiti_mail":"EMAIL",
+            "anno":"ANNO_ORIG","imponibile":"IMPONIBILE"
         }
-        df.rename(columns=required_cols, inplace=True)
+        df.rename(columns=required, inplace=True)
         if 'CLIENTE' in df.columns:
             df['CLIENTE'] = df['CLIENTE'].apply(clean_customer_name)
         df['ANNO_ORIG'] = df['ANNO_ORIG'].astype(str).str.split('/')
@@ -145,43 +170,44 @@ def load_clients_df(uploaded_file=None) -> pd.DataFrame:
         df['ANNO'] = df['ANNO_ORIG'].apply(normalize_year)
         df['FATTURATO'] = df['IMPONIBILE'].apply(parse_decimal_string)
         df['PAESE'] = df.apply(lambda r: detect_country(r.get('CAP',''), r.get('PROVINCIA','')), axis=1)
-        agg_cols = {k:'first' for k in ['VIA','CITTA','CAP','PROVINCIA','TITOLARE','EMAIL','PAESE']}
-        agg_cols['FATTURATO'] = 'sum'
-        cols_to_agg = {k:v for k,v in agg_cols.items() if k in df.columns}
-        return df.groupby(['CLIENTE','ANNO']).agg(cols_to_agg).reset_index()
+        agg = {k:'first' for k in ['VIA','CITTA','CAP','PROVINCIA','TITOLARE','EMAIL','PAESE']}
+        agg['FATTURATO'] = 'sum'
+        agg = {k:v for k,v in agg.items() if k in df.columns}
+        return df.groupby(['CLIENTE','ANNO']).agg(agg).reset_index()
     except Exception as e:
         st.error(f"Errore lettura file clienti: {e}")
         return pd.DataFrame()
 
 @st.cache_data
 def load_all_orders_df() -> pd.DataFrame:
-    order_files = glob.glob(str(DATA_DIR / "ordini_*"))
-    if not order_files: return pd.DataFrame()
-    dfs = []
-    for file in order_files:
+    files = glob.glob(str(DATA_DIR / "ordini_*"))
+    if not files: return pd.DataFrame()
+    dfs=[]
+    for f in files:
         try:
-            year_match = re.search(r'(\d+)', Path(file).stem)
-            if not year_match: continue
-            year_full = normalize_year(year_match.group(1))
-            df = pd.read_csv(file, sep=';', encoding='latin1', low_memory=False) if file.endswith('.csv') else pd.read_excel(file)
+            y = re.search(r'(\d+)', Path(f).stem)
+            if not y: continue
+            year = normalize_year(y.group(1))
+            df = pd.read_csv(f, sep=';', encoding='latin1', low_memory=False) if f.endswith('.csv') else pd.read_excel(f)
             df.columns = [re.sub(r'_\d+$','',c).strip().lower() for c in df.columns]
-            df['ANNO'] = year_full
+            df['ANNO'] = year
             dfs.append(df)
         except Exception as e:
-            st.warning(f"Impossibile leggere {file}: {e}")
+            st.warning(f"Impossibile leggere {f}: {e}")
     if not dfs: return pd.DataFrame()
-    df_orders = pd.concat(dfs, ignore_index=True)
-    if 'nome_cliente' in df_orders.columns:
-        df_orders['nome_cliente'] = df_orders['nome_cliente'].apply(clean_customer_name)
-    df_orders.dropna(subset=['articolo_colore','quantita'], inplace=True)
-    df_orders = df_orders[df_orders['quantita'] != 0].copy()
-    df_orders['FATTURATO_ORDINE'] = df_orders['imponibile'].apply(parse_decimal_string) if 'imponibile' in df_orders.columns else 0
-    df_orders['KG'] = df_orders['quantita'].apply(parse_decimal_string).round(2)
-    split_data = df_orders['articolo_colore'].str.rsplit(' - ', n=1, expand=True)
-    df_orders['ARTICOLO'] = split_data[0].str.strip()
-    df_orders['COLORE'] = split_data[1].str.strip().fillna('NON SPECIFICATO')
-    return df_orders[['nome_cliente','ANNO','ARTICOLO','COLORE','KG','FATTURATO_ORDINE']]
+    dfo = pd.concat(dfs, ignore_index=True)
+    if 'nome_cliente' in dfo.columns:
+        dfo['nome_cliente'] = dfo['nome_cliente'].apply(clean_customer_name)
+    dfo.dropna(subset=['articolo_colore','quantita'], inplace=True)
+    dfo = dfo[dfo['quantita'] != 0].copy()
+    dfo['FATTURATO_ORDINE'] = dfo['imponibile'].apply(parse_decimal_string) if 'imponibile' in dfo.columns else 0
+    dfo['KG'] = dfo['quantita'].apply(parse_decimal_string).round(2)
+    split = dfo['articolo_colore'].str.rsplit(' - ', n=1, expand=True)
+    dfo['ARTICOLO'] = split[0].str.strip()
+    dfo['COLORE'] = split[1].str.strip().fillna('NON SPECIFICATO')
+    return dfo[['nome_cliente','ANNO','ARTICOLO','COLORE','KG','FATTURATO_ORDINE']]
 
+# -------------------- EVALUATION + ACTIONS --------------------
 def load_evaluation(cliente: str, anno: str) -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
@@ -191,14 +217,14 @@ def load_evaluation(cliente: str, anno: str) -> dict:
     if row: return dict(zip(keys, row))
     return {k:3 for k in keys}
 
-def save_evaluation(cliente: str, anno: str, data_dict: dict):
+def save_evaluation(cliente: str, anno: str, data: dict):
     try:
         conn = get_db_connection()
         keys = [q['key'] for q in EVALUATION_QUESTIONS]
         cols = ", ".join(keys)
         placeholders = ", ".join(["?"]*len(keys))
         q = f"INSERT OR REPLACE INTO evaluation (cliente, anno, {cols}, updated_at) VALUES (?, ?, {placeholders}, ?)"
-        vals = [cliente, anno] + [data_dict.get(k,1) for k in keys] + [datetime.now().isoformat()]
+        vals = [cliente, anno] + [data.get(k,1) for k in keys] + [datetime.now().isoformat()]
         with conn:
             conn.execute(q, tuple(vals))
         st.toast(f"Valutazione per {cliente.upper()} ({anno}) salvata!")
@@ -219,7 +245,49 @@ def get_matrix_quadrant(x,y):
     if x<=3 and y>3: return "Amico a Basso Impatto"
     return "Cliente Marginale"
 
-# ------------------ LLM UTILS ------------------
+def stars_from_total(total_score: float) -> int:
+    if total_score >= 65: return 5
+    if total_score >= 55: return 4
+    if total_score >= 45: return 3
+    if total_score >= 35: return 2
+    return 1
+
+def priority_from_quadrant(val_ec: float, val_rel: float) -> float:
+    quad = get_matrix_quadrant(val_ec, val_rel)
+    if quad == "Specialista Redditizio": base = 5.0
+    elif quad == "Amico a Basso Impatto": base = 4.0
+    elif quad == "Partner Chiave": base = 2.0
+    else: base = 3.0
+    adj = (5 - val_rel)*0.5 + (5 - min(val_ec,5))*0.3
+    return round(base + adj, 2)
+
+def upsert_client_action(cliente: str, anno_rif: str, stars: int = None,
+                         priority: float = None, note: str = None, done: int = None):
+    conn = get_db_connection()
+    now = datetime.now().isoformat()
+    with conn:
+        ex = conn.execute("SELECT 1 FROM client_actions WHERE cliente=? AND anno_rif=?", (cliente, anno_rif)).fetchone()
+        if not ex:
+            conn.execute(
+                "INSERT INTO client_actions (cliente, anno_rif, stars, priority, note, done, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (cliente, anno_rif, stars or 0, priority or 0.0, note or "", done or 0, now)
+            )
+        else:
+            sets=[]; vals=[]
+            if stars is not None: sets.append("stars=?"); vals.append(int(stars))
+            if priority is not None: sets.append("priority=?"); vals.append(float(priority))
+            if note is not None: sets.append("note=?"); vals.append(note)
+            if done is not None: sets.append("done=?"); vals.append(int(done))
+            sets.append("updated_at=?"); vals.append(now)
+            sql = f"UPDATE client_actions SET {', '.join(sets)} WHERE cliente=? AND anno_rif=?"
+            vals += [cliente, anno_rif]
+            conn.execute(sql, tuple(vals))
+
+def load_actions_table(anno_rif: str):
+    conn = get_db_connection()
+    return pd.read_sql_query("SELECT * FROM client_actions WHERE anno_rif = ?", conn, params=[anno_rif])
+
+# -------------------- LLM --------------------
 @st.cache_resource
 def get_openai_client():
     if "OPENAI_API_KEY" not in st.secrets:
@@ -238,37 +306,17 @@ def _truncate(s: str, max_chars: int = 15000) -> str:
 def call_llm(system_prompt: str, user_prompt: str) -> str:
     client = get_openai_client()
     if client is None:
-        return "⚠️ Configura OPENAI_API_KEY nei secrets."
+        return "⚠️ Configura OPENAI_API_KEY nei secrets della app."
     resp = client.chat.completions.create(
         model=MODEL_NAME,
         temperature=TEMPERATURE,
-        messages=[
-            {"role":"system","content":system_prompt},
-            {"role":"user","content":_truncate(user_prompt)}
-        ]
+        messages=[{"role":"system","content":system_prompt},{"role":"user","content":_truncate(user_prompt)}]
     )
     return resp.choices[0].message.content.strip()
 
 def anon_client_id(name: str) -> str:
     h = hashlib.sha256((ANON_SALT + (name or "")).encode("utf-8")).hexdigest()[:8].upper()
     return f"CLIENTE_{h}"
-
-def build_client_digest_anon(cliente, anni_sel, anno_rif, dfc, dfo):
-    alias = anon_client_id(cliente)
-    anni_sel = [str(a) for a in anni_sel] if anni_sel else []
-    eval_data = load_evaluation(cliente, anno_rif)
-    tot, val_ec, val_rel = calculate_scores(eval_data)
-    fatt_cli = (dfc[(dfc['CLIENTE']==cliente)&(dfc['ANNO'].isin(anni_sel))]
-                .groupby('ANNO',as_index=False)['FATTURATO'].sum().sort_values('ANNO'))
-    ord_cli = dfo[(dfo['nome_cliente']==cliente) & (dfo['ANNO'].isin(anni_sel))]
-    kg_tot = float(ord_cli['KG'].sum()); fatt_o = float(ord_cli['FATTURATO_ORDINE'].sum())
-    prezzo = (fatt_o/kg_tot) if kg_tot>0 else 0
-    lines=[]
-    lines.append(f"Cliente (anonimo): {alias} | Anno valutazione: {anno_rif} | Anni: {', '.join(anni_sel) or 'tutti'}")
-    lines.append(f"Valutazione → Tot: {tot:.1f} | Econ: {val_ec:.2f} | Rel: {val_rel:.2f}")
-    lines.append(f"Fatturato per anno (valori €): { {r['ANNO']: float(r['FATTURATO']) for _,r in fatt_cli.iterrows()} }")
-    lines.append(f"Ordini → Kg: {kg_tot:.2f} | Fatt: {fatt_o:.2f} | €/Kg: {prezzo:.3f}")
-    return "\n".join(lines)
 
 def save_ai_output(cliente: str, anno_rif: str, digest: str, output: str):
     try:
@@ -289,80 +337,39 @@ def load_last_ai_output(cliente: str, anno_rif: str):
         (cliente, anno_rif)
     )
     row = cur.fetchone()
-    if row:
-        return {"output": row[0], "created_at": row[1]}
-    return None
+    return {"output": row[0], "created_at": row[1]} if row else None
 
-# ---------- ACTIONS: stelle, priorità, note, done ----------
-def stars_from_total(total_score: float) -> int:
-    # 15 domande * max 5 = 75
-    if total_score >= 65: return 5
-    if total_score >= 55: return 4
-    if total_score >= 45: return 3
-    if total_score >= 35: return 2
-    return 1
+def build_client_digest_anon(cliente, anni_sel, anno_rif, dfc, dfo):
+    alias = anon_client_id(cliente)
+    anni_sel = [str(a) for a in anni_sel] if anni_sel else []
+    eval_data = load_evaluation(cliente, anno_rif)
+    tot, val_ec, val_rel = calculate_scores(eval_data)
+    fatt_cli = (dfc[(dfc['CLIENTE']==cliente)&(dfc['ANNO'].isin(anni_sel))]
+                .groupby('ANNO',as_index=False)['FATTURATO'].sum().sort_values('ANNO'))
+    ord_cli = dfo[(dfo['nome_cliente']==cliente) & (dfo['ANNO'].isin(anni_sel))]
+    kg_tot = float(ord_cli['KG'].sum()); fatt_o = float(ord_cli['FATTURATO_ORDINE'].sum())
+    prezzo = (fatt_o/kg_tot) if kg_tot>0 else 0
+    lines=[]
+    lines.append(f"Cliente (anonimo): {alias} | Anno valutazione: {anno_rif} | Anni: {', '.join(anni_sel) or 'tutti'}")
+    lines.append(f"Valutazione → Tot: {tot:.1f} | Econ: {val_ec:.2f} | Rel: {val_rel:.2f}")
+    lines.append(f"Fatturato per anno (€): { {r['ANNO']: float(r['FATTURATO']) for _,r in fatt_cli.iterrows()} }")
+    lines.append(f"Ordini → Kg: {kg_tot:.2f} | Fatt: {fatt_o:.2f} | €/Kg: {prezzo:.3f}")
+    return "\n".join(lines)
 
-def priority_from_quadrant(val_ec: float, val_rel: float) -> float:
-    quad = get_matrix_quadrant(val_ec, val_rel)
-    # più alto => più urgente
-    if quad == "Specialista Redditizio": base = 5.0
-    elif quad == "Amico a Basso Impatto": base = 4.0
-    elif quad == "Partner Chiave": base = 2.0
-    else: base = 3.0  # Cliente Marginale
-    # penalizza relazionale alto (già ok), aumenta se relazionale basso
-    adj = (5 - val_rel) * 0.5 + (5 - min(val_ec,5)) * 0.3
-    return round(base + adj, 2)
-
-def upsert_client_action(cliente: str, anno_rif: str, stars: int = None,
-                         priority: float = None, note: str = None, done: int = None):
-    conn = get_db_connection()
-    now = datetime.now().isoformat()
-    with conn:
-        # se esiste riga, aggiorna; altrimenti crea
-        cur = conn.execute("SELECT 1 FROM client_actions WHERE cliente=? AND anno_rif=?", (cliente, anno_rif))
-        exists = cur.fetchone() is not None
-        if not exists:
-            conn.execute(
-                "INSERT INTO client_actions (cliente, anno_rif, stars, priority, note, done, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (cliente, anno_rif, stars or 0, priority or 0.0, note or "", done or 0, now)
-            )
-        else:
-            sets = []; vals = []
-            if stars is not None: sets.append("stars=?"); vals.append(int(stars))
-            if priority is not None: sets.append("priority=?"); vals.append(float(priority))
-            if note is not None: sets.append("note=?"); vals.append(note)
-            if done is not None: sets.append("done=?"); vals.append(int(done))
-            sets.append("updated_at=?"); vals.append(now)
-            if sets:
-                sql = f"UPDATE client_actions SET {', '.join(sets)} WHERE cliente=? AND anno_rif=?"
-                vals += [cliente, anno_rif]
-                conn.execute(sql, tuple(vals))
-
-def load_actions_table(anno_rif: str):
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM client_actions WHERE anno_rif = ?", conn, params=[anno_rif])
-    return df
-
-# ---------- Nuovi clienti per anno ----------
+# -------------------- NUOVI CLIENTI --------------------
 @st.cache_data
 def compute_first_year_per_client(df_clienti: pd.DataFrame, df_ordini: pd.DataFrame) -> pd.DataFrame:
-    # primo anno in anagrafica
-    first_a = (df_clienti.groupby('CLIENTE')['ANNO'].min().reset_index().rename(columns={'ANNO':'FIRST_YEAR'}))
-    # se vuoi includere anche primo anno ordini (più robusto)
+    first_a = df_clienti.groupby('CLIENTE')['ANNO'].min().reset_index().rename(columns={'ANNO':'FIRST_YEAR'})
     if not df_ordini.empty:
-        first_o = (df_ordini.groupby('nome_cliente')['ANNO'].min().reset_index().rename(columns={'nome_cliente':'CLIENTE','ANNO':'FIRST_YEAR_ORD'}))
+        first_o = df_ordini.groupby('nome_cliente')['ANNO'].min().reset_index().rename(columns={'nome_cliente':'CLIENTE','ANNO':'FIRST_YEAR_ORD'})
         first = pd.merge(first_a, first_o, on='CLIENTE', how='outer')
         first['FIRST_YEAR'] = first[['FIRST_YEAR','FIRST_YEAR_ORD']].min(axis=1)
         first.drop(columns=['FIRST_YEAR_ORD'], inplace=True)
     else:
         first = first_a
-    return first  # colonne: CLIENTE, FIRST_YEAR
+    return first
 
-# ------------------ PARSER NATURALE & COPILOT (come già impostato) ------------------
-# (omessi per brevità: se già hai le versioni avanzate che ti ho passato, lasciale così)
-# ---- In questo file completo, tieni il tuo blocco Copilot esistente ----
-
-# ------------------ PAGINE APP ------------------
+# -------------------- PAGINE --------------------
 def page_dashboard(df_clienti, df_ordini, anni_selezionati, paese_selezionato, analysis_mode):
     st.title("Dashboard Riepilogativa")
     df_filtrato = df_clienti[df_clienti['ANNO'].isin(anni_selezionati)] if anni_selezionati else df_clienti
@@ -384,25 +391,25 @@ def page_dashboard(df_clienti, df_ordini, anni_selezionati, paese_selezionato, a
 
     st.header("Macrodati Ordini")
     if not df_ordini.empty and anni_selezionati:
-        ordini_filtrati_globale = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
+        ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
         if analysis_mode == "Aggrega Anni":
             c1,c2,c3 = st.columns(3)
             with c1:
                 st.markdown("###### Top 10 Articoli (per Kg)")
-                st.dataframe(ordini_filtrati_globale.groupby('ARTICOLO')['KG'].sum().nlargest(10).reset_index(),
+                st.dataframe(ordini_filtrati.groupby('ARTICOLO')['KG'].sum().nlargest(10).reset_index(),
                              use_container_width=True, hide_index=True, height=385)
             with c2:
                 st.markdown("###### Top 10 Colori (per Kg)")
-                st.dataframe(ordini_filtrati_globale.groupby('COLORE')['KG'].sum().nlargest(10).reset_index(),
+                st.dataframe(ordini_filtrati.groupby('COLORE')['KG'].sum().nlargest(10).reset_index(),
                              use_container_width=True, hide_index=True, height=385)
             with c3:
                 st.markdown("###### Top 10 Articolo-Colore (per Kg)")
-                st.dataframe(ordini_filtrati_globale.groupby(['ARTICOLO','COLORE'])['KG'].sum().nlargest(10).reset_index(),
+                st.dataframe(ordini_filtrati.groupby(['ARTICOLO','COLORE'])['KG'].sum().nlargest(10).reset_index(),
                              use_container_width=True, hide_index=True, height=385)
         else:
             st.info("Modalità Confronto Anni: andamento dei 10 articoli più importanti nel periodo.")
-            top_10 = ordini_filtrati_globale.groupby('ARTICOLO')['KG'].sum().nlargest(10).index
-            dfc = ordini_filtrati_globale[ordini_filtrati_globale['ARTICOLO'].isin(top_10)]
+            top_10 = ordini_filtrati.groupby('ARTICOLO')['KG'].sum().nlargest(10).index
+            dfc = ordini_filtrati[ordini_filtrati['ARTICOLO'].isin(top_10)]
             pivot = dfc.pivot_table(index='ARTICOLO', columns='ANNO', values='KG', aggfunc='sum').fillna(0)
             pivot['Totale'] = pivot.sum(axis=1)
             pivot.sort_values('Totale', ascending=False, inplace=True)
@@ -422,8 +429,8 @@ def page_elenco_clienti(df_clienti, df_ordini, anni_selezionati, paese_seleziona
         if analysis_mode == "Aggrega Anni":
             df_ranking = df_filtrato.groupby('CLIENTE').agg(Fatturato_Anagrafica=('FATTURATO','sum')).reset_index()
             if not df_ordini.empty and anni_selezionati:
-                ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
-                df_ord_agg = ordini_filtrati.groupby('nome_cliente').agg(KG_Ordinati=('KG','sum')).reset_index()
+                ordini_f = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
+                df_ord_agg = ordini_f.groupby('nome_cliente').agg(KG_Ordinati=('KG','sum')).reset_index()
                 df_ranking = pd.merge(df_ranking, df_ord_agg, left_on='CLIENTE', right_on='nome_cliente', how='left')
             df_ranking = pd.merge(df_ranking, df_ranking_base, on='CLIENTE', how='left')
             df_ranking['KG_Ordinati'] = df_ranking['KG_Ordinati'].fillna(0)
@@ -437,10 +444,10 @@ def page_elenco_clienti(df_clienti, df_ordini, anni_selezionati, paese_seleziona
         else:
             st.info("Modalità Confronto Anni: le tabelle mostrano i dati disaggregati per anno.")
             fatt_pivot = df_filtrato.pivot_table(index='CLIENTE', columns='ANNO', values='FATTURATO', aggfunc='sum')
-            ordini_filtrati = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
-            kg_pivot = ordini_filtrati.pivot_table(index='nome_cliente', columns='ANNO', values='KG', aggfunc='sum')
+            ordini_f = df_ordini[df_ordini['ANNO'].isin(anni_selezionati)]
+            kg_pivot = ordini_f.pivot_table(index='nome_cliente', columns='ANNO', values='KG', aggfunc='sum')
             df_compare = pd.merge(fatt_pivot, kg_pivot, left_index=True, right_index=True, how='outer').fillna(0)
-            col_order = []
+            col_order=[]
             for year in sorted(anni_selezionati, reverse=True):
                 cf, ck = f"Fatturato_{year}", f"KG_{year}"
                 df_compare.rename(columns={year+'_x':cf, year+'_y':ck}, inplace=True, errors='ignore')
@@ -452,7 +459,6 @@ def page_elenco_clienti(df_clienti, df_ordini, anni_selezionati, paese_seleziona
             df_compare['CLIENTE'] = df_compare['CLIENTE'].str.upper()
             st.dataframe(df_compare[['CLIENTE','PAESE']+col_order], use_container_width=True, hide_index=True)
 
-# --- REPORT AVANZATI (già presente) ---
 def page_report_avanzati(df_ordini):
     st.title("Report Avanzati — Analisi Predittiva per Articolo")
     if df_ordini.empty or 'ARTICOLO' not in df_ordini.columns:
@@ -485,21 +491,18 @@ def page_report_avanzati(df_ordini):
     st.plotly_chart(fig, use_container_width=True)
     if len(df_art)>=2: st.caption("Linea tratteggiata = regressione sui dati storici; rombo = proiezione anno successivo.")
 
-# --- ANALISI DETTAGLIATA (aggiornata con filtro Nuovi e Stelle/Azioni) ---
 def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selezionati_globali, analysis_mode):
     st.title("Analisi Dettagliata Cliente")
 
-    # Calcolo "nuovi clienti per anno"
-    df_first = compute_first_year_per_client(df_clienti, df_ordini)  # CLIENTE, FIRST_YEAR
+    # Nuovi clienti
+    df_first = compute_first_year_per_client(df_clienti, df_ordini)
 
-    # Selettori: filtro "Nuovi [anno]" e scelta clienti
     c1, c2, c3 = st.columns([1,1,2])
     with c1:
         anno_new = st.selectbox("Anno 'nuovi clienti'", options=anni_disponibili, index=0, key="anno_nuovi")
     with c2:
         only_new = st.checkbox(f"Mostra solo nuovi clienti {anno_new}", value=False, key="flag_nuovi")
     with c3:
-        # costruiamo la lista opzioni
         clienti_all = df_clienti['CLIENTE'].unique().tolist()
         if only_new:
             new_set = set(df_first[df_first['FIRST_YEAR']==str(anno_new)]['CLIENTE'])
@@ -511,7 +514,6 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
     if not clienti_selezionati_upper:
         st.info("Seleziona uno o più clienti per iniziare l'analisi.")
         return
-
     clienti_selezionati = [c.lower() for c in clienti_selezionati_upper]
 
     anni_scheda_selezionati = st.multiselect(
@@ -521,21 +523,16 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
         key="anni_dettaglio_selector"
     )
 
-    # === TABELLE AZIONI SOTTO IL SELETTORE ===
+    # Tabelle azioni
     st.subheader("📌 Azioni Prioritarie")
     anno_rif_tab = anni_scheda_selezionati[0] if anni_scheda_selezionati else anni_disponibili[0]
-    # carica azioni per l'anno di riferimento
     df_actions = load_actions_table(anno_rif_tab)
-    # arricchisco con display name
     if not df_actions.empty:
         df_actions['CLIENTE_DISPLAY'] = df_actions['cliente'].str.upper()
         todo = df_actions[df_actions['done']==0].copy()
         done = df_actions[df_actions['done']==1].copy()
-
-        # ordina per priorità (desc)
         todo.sort_values(by=['priority','updated_at'], ascending=[False, False], inplace=True)
         done.sort_values(by=['updated_at'], ascending=False, inplace=True)
-
         col_todo, col_done = st.columns(2)
         with col_todo:
             st.markdown("**Da fare (ordinate per priorità)**")
@@ -550,7 +547,6 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                             upsert_client_action(row['cliente'], anno_rif_tab, note=note_val, done=1 if done_ck else 0)
                             st.success("Aggiornato.")
                             st.experimental_rerun()
-
         with col_done:
             st.markdown("**Completate**")
             if done.empty:
@@ -567,7 +563,7 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
     else:
         st.info("Nessuna azione salvata per quest'anno. Verranno create quando fai l'analisi IA/Swot.")
 
-    # === Schede Cliente ===
+    # Schede
     st.header(f"Scheda Alleati: {', '.join(clienti_selezionati_upper)}")
     anno_riferimento_scheda = anni_scheda_selezionati[0] if anni_scheda_selezionati else anni_disponibili[0]
     tab_eval, tab_dati, tab_ordini = st.tabs(["Valutazione & IA","Anagrafica & Fatturato","Ordini & Statistiche"])
@@ -576,7 +572,7 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
         st.subheader(f"Valutazioni + Azioni (Anno di riferimento: {anno_riferimento_scheda})")
         for cliente in clienti_selezionati:
             with st.expander(f"{cliente.upper()}"):
-                # --- Valutazione slider ---
+                # Valutazione
                 with st.form(key=f"evaluation_form_{cliente}_{anno_riferimento_scheda}"):
                     ev = load_evaluation(cliente, anno_riferimento_scheda)
                     cols = st.columns(3); temp={}
@@ -589,7 +585,6 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                         st.cache_data.clear()
                         st.rerun()
 
-                # Punteggi e stelle / priorità
                 ev_cur = load_evaluation(cliente, anno_riferimento_scheda)
                 tot, val_ec, val_rel = calculate_scores(ev_cur)
                 quad = get_matrix_quadrant(val_ec, val_rel)
@@ -603,9 +598,9 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                 with cst2:
                     st.metric("Priorità (auto)", f"{auto_priority:.2f}")
                 with cst3:
-                    note_act = st.text_input("Nota/Azione da intraprendere", key=f"note_{cliente}_{anno_riferimento_scheda}", placeholder="Es. programmare visita, proposta up-sell, ecc.")
+                    note_act = st.text_input("Nota/Azione da intraprendere", key=f"note_{cliente}_{anno_riferimento_scheda}", placeholder="Es. visita, proposta up-sell, ecc.")
 
-                # Ultima analisi IA salvata
+                # IA salvata
                 saved = load_last_ai_output(cliente, anno_riferimento_scheda)
                 if saved:
                     st.markdown("**Ultima analisi IA salvata**")
@@ -614,7 +609,6 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                 else:
                     st.info("Nessuna analisi IA salvata per questo cliente/anno.")
 
-                # Bottoni: Analizza con IA + Salva Stella/Azione
                 colb1, colb2 = st.columns([1,1])
                 with colb1:
                     if st.button("🔎 Analizza con IA", key=f"ai_analyze_{cliente}_{anno_riferimento_scheda}"):
@@ -626,7 +620,6 @@ def page_analisi_dettagliata(df_clienti, df_ordini, anni_disponibili, anni_selez
                             out = call_llm(system, user)
                             st.markdown("#### Risultato IA"); st.markdown(out)
                             save_ai_output(cliente, anno_riferimento_scheda, digest, out)
-                            # allineo/creo riga azione con auto_stars & auto_priority
                             upsert_client_action(cliente, anno_riferimento_scheda, stars=auto_stars, priority=auto_priority)
                             st.experimental_rerun()
                 with colb2:
@@ -752,7 +745,7 @@ def page_stato_dati(df_clienti, df_ordini):
     else:
         st.info("Carica sia anagrafica che ordini.")
 
-# ------------------ BOOTSTRAP APP ------------------
+# -------------------- BOOTSTRAP --------------------
 init_db()
 df_clienti = load_clients_df()
 df_ordini = load_all_orders_df()
@@ -786,8 +779,6 @@ elif pagina == "Analisi Dettagliata":
 elif pagina == "Report Avanzati":
     page_report_avanzati(df_ordini)
 elif pagina == "Copilot IA":
-    # usa le funzioni Copilot avanzate che ti ho già passato
-    from types import SimpleNamespace
-    st.info("Apri la pagina Copilot IA dal file con le funzioni avanzate già integrate.")
+    st.info("La pagina Copilot IA con intent avanzati è nel file in cui l'hai integrata. Qui manteniamo il routing.")
 elif pagina == "Stato dei Dati":
     page_stato_dati(df_clienti, df_ordini)
